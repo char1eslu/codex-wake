@@ -6,6 +6,7 @@ struct ThreadDetailView: View {
     @Binding var activePane: WakeFocusPane
     @State private var isMoveSheetPresented = false
     @State private var detailScrollViewBox = WeakScrollViewBox()
+    @State private var detailTopAnchorBox = WeakViewBox()
 
     var body: some View {
         Group {
@@ -13,22 +14,27 @@ struct ThreadDetailView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(alignment: .leading, spacing: 18) {
-                            DetailScrollViewAccessor(scrollViewBox: detailScrollViewBox)
-                                .frame(width: 0, height: 0)
-                            Color.clear
-                                .frame(height: 1)
-                                .id(DetailScrollTarget.top)
                             header(thread)
+                                .id(DetailScrollTarget.top(for: thread.id))
+                                .background(alignment: .topLeading) {
+                                    DetailTopAnchorAccessor(viewBox: detailTopAnchorBox)
+                                        .frame(width: 0, height: 0)
+                                }
                             metadata(thread)
                             actions(thread)
                             operationReport
                             preview
                             Color.clear
                                 .frame(height: 1)
-                                .id(DetailScrollTarget.bottom)
+                                .id(DetailScrollTarget.bottom(for: thread.id))
                         }
-                        .padding(22)
+                        .padding(.horizontal, 22)
+                        .padding(.bottom, 22)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .background {
+                            DetailScrollViewAccessor(scrollViewBox: detailScrollViewBox)
+                                .frame(width: 0, height: 0)
+                        }
                     }
                     .id(model.selectedThreadID)
                     .onTapGesture {
@@ -36,10 +42,7 @@ struct ThreadDetailView: View {
                     }
                     .onChange(of: model.selectedThreadID) { _, _ in
                         detailScrollViewBox = WeakScrollViewBox()
-                        scrollDetailToTop(proxy: proxy)
-                    }
-                    .onAppear {
-                        scrollDetailToTop(proxy: proxy)
+                        detailTopAnchorBox = WeakViewBox()
                     }
                     .onReceive(NotificationCenter.default.publisher(for: .codexWakeScrollDetail)) { notification in
                         guard let action = notification.object as? WakeDetailScrollAction else { return }
@@ -234,98 +237,156 @@ struct ThreadDetailView: View {
         else { return .unknown }
 
         let visibleHeight = scrollView.contentView.bounds.height
-        let maxY = max(documentView.bounds.height - visibleHeight, 0)
         let delta = max(96, min(visibleHeight * 0.92, visibleHeight * pageScale))
         let signedDelta = documentView.isFlipped ? direction * delta : -direction * delta
-        var origin = scrollView.contentView.bounds.origin
-        origin.y = min(max(origin.y + signedDelta, 0), maxY)
+        let previousOrigin = scrollView.contentView.bounds.origin
+        var origin = previousOrigin
+        origin.y += signedDelta
+        origin = constrainedScrollOrigin(origin, in: scrollView)
         scrollView.contentView.scroll(to: origin)
         scrollView.reflectScrolledClipView(scrollView.contentView)
 
-        let topY = documentView.isFlipped ? 0 : maxY
-        let bottomY = documentView.isFlipped ? maxY : 0
-        if abs(origin.y - topY) < 1 {
+        if abs(origin.y - previousOrigin.y) < 1 {
+            if direction < 0 {
+                return .top
+            }
+            if direction > 0 {
+                return .bottom
+            }
+        }
+
+        let topOrigin = detailBoundaryOrigin(.top, in: scrollView, documentView: documentView)
+        let bottomOrigin = detailBoundaryOrigin(.bottom, in: scrollView, documentView: documentView)
+        if abs(origin.y - topOrigin.y) < 1 {
             return .top
         }
-        if abs(origin.y - bottomY) < 1 {
+        if abs(origin.y - bottomOrigin.y) < 1 {
             return .bottom
         }
         return .middle
     }
 
     private func handleDetailScroll(_ action: WakeDetailScrollAction, proxy: ScrollViewProxy) {
+        guard let threadID = model.selectedThreadID else { return }
+
         switch action {
         case .step(let direction):
             let boundary = scrollDetail(by: CGFloat(direction), pageScale: 0.46)
-            alignDetailIfNeeded(boundary, direction: direction, proxy: proxy)
+            alignDetailIfNeeded(boundary, direction: direction, threadID: threadID, proxy: proxy)
         case .page(let direction):
             let boundary = scrollDetail(by: CGFloat(direction), pageScale: 0.86)
-            alignDetailIfNeeded(boundary, direction: direction, proxy: proxy)
+            alignDetailIfNeeded(boundary, direction: direction, threadID: threadID, proxy: proxy)
         case .top:
-            scrollDetailToTop(proxy: proxy)
+            scrollDetailToTop(proxy: proxy, threadID: threadID)
         case .bottom:
-            scrollDetailToBottom(proxy: proxy)
+            scrollDetailToBottom(proxy: proxy, threadID: threadID)
         }
     }
 
-    private func alignDetailIfNeeded(_ boundary: DetailScrollBoundary, direction: Double, proxy: ScrollViewProxy) {
+    private func alignDetailIfNeeded(_ boundary: DetailScrollBoundary, direction: Double, threadID: String, proxy: ScrollViewProxy) {
         switch (boundary, direction) {
         case (.top, ..<0):
-            scrollDetailToTop(proxy: proxy)
+            scrollDetailToTop(proxy: proxy, threadID: threadID)
         case (.bottom, 0...):
-            scrollDetailToBottom(proxy: proxy)
+            scrollDetailToBottom(proxy: proxy, threadID: threadID)
         default:
             break
         }
     }
 
-    private func scrollDetailToTop(proxy: ScrollViewProxy) {
-        scrollDetailToTopNow(proxy: proxy)
-        DispatchQueue.main.async {
-            scrollDetailToTopNow(proxy: proxy)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            scrollDetailToTopNow(proxy: proxy)
-        }
+    private func scrollDetailToTop(proxy: ScrollViewProxy, threadID: String?) {
+        guard let threadID else { return }
+
+        _ = setDetailScrollBoundary(.top)
+        scrollDetailToTopNow(proxy: proxy, threadID: threadID)
     }
 
-    private func scrollDetailToTopNow(proxy: ScrollViewProxy) {
-        proxy.scrollTo(DetailScrollTarget.top, anchor: .top)
-    }
-
-    private func scrollDetailToBottom(proxy: ScrollViewProxy) {
-        setDetailScrollBoundary(.bottom)
-        proxy.scrollTo(DetailScrollTarget.bottom, anchor: .bottom)
-    }
-
-    private func setDetailScrollBoundary(_ boundary: DetailScrollBoundary) {
-        guard let scrollView = detailScrollViewBox.scrollView,
-              let documentView = scrollView.documentView
-        else { return }
-
-        let visibleHeight = scrollView.contentView.bounds.height
-        let maxY = max(documentView.bounds.height - visibleHeight, 0)
-        let topY = documentView.isFlipped ? 0 : maxY
-        let bottomY = documentView.isFlipped ? maxY : 0
-        var origin = scrollView.contentView.bounds.origin
-
-        switch boundary {
-        case .top:
-            origin.y = topY
-        case .bottom:
-            origin.y = bottomY
-        case .middle, .unknown:
+    private func scrollDetailToTopNow(proxy: ScrollViewProxy, threadID: String) {
+        if setDetailScrollToTopAnchor() {
             return
         }
 
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            proxy.scrollTo(DetailScrollTarget.top(for: threadID), anchor: .top)
+        }
+    }
+
+    private func scrollDetailToBottom(proxy: ScrollViewProxy, threadID: String) {
+        setDetailScrollBoundary(.bottom)
+        proxy.scrollTo(DetailScrollTarget.bottom(for: threadID), anchor: .bottom)
+    }
+
+    @discardableResult
+    private func setDetailScrollBoundary(_ boundary: DetailScrollBoundary) -> Bool {
+        guard let scrollView = detailScrollViewBox.scrollView,
+              let documentView = scrollView.documentView
+        else { return false }
+
+        switch boundary {
+        case .middle, .unknown:
+            return false
+        case .top, .bottom:
+            let origin = detailBoundaryOrigin(boundary, in: scrollView, documentView: documentView)
+            scrollView.contentView.scroll(to: origin)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            return true
+        }
+    }
+
+    private func detailBoundaryOrigin(_ boundary: DetailScrollBoundary, in scrollView: NSScrollView, documentView: NSView) -> CGPoint {
+        let visibleHeight = scrollView.contentView.bounds.height
+        let span = max(
+            documentView.bounds.height + visibleHeight + abs(documentView.bounds.minY) + abs(documentView.frame.minY) + 10_000,
+            10_000
+        )
+        let movesTowardNegativeY: Bool
+        switch boundary {
+        case .top:
+            movesTowardNegativeY = documentView.isFlipped
+        case .bottom:
+            movesTowardNegativeY = !documentView.isFlipped
+        case .middle, .unknown:
+            return scrollView.contentView.bounds.origin
+        }
+
+        var origin = scrollView.contentView.bounds.origin
+        origin.y += movesTowardNegativeY ? -span : span
+        return constrainedScrollOrigin(origin, in: scrollView)
+    }
+
+    private func setDetailScrollToTopAnchor() -> Bool {
+        guard let scrollView = detailScrollViewBox.scrollView,
+              let documentView = scrollView.documentView,
+              let anchorView = detailTopAnchorBox.view
+        else { return false }
+
+        let anchorFrame = anchorView.convert(anchorView.bounds, to: documentView)
+        let visibleHeight = scrollView.contentView.bounds.height
+        var origin = scrollView.contentView.bounds.origin
+        origin.y = documentView.isFlipped ? anchorFrame.minY : anchorFrame.maxY - visibleHeight
+        origin = constrainedScrollOrigin(origin, in: scrollView)
         scrollView.contentView.scroll(to: origin)
         scrollView.reflectScrolledClipView(scrollView.contentView)
+        return true
+    }
+
+    private func constrainedScrollOrigin(_ origin: CGPoint, in scrollView: NSScrollView) -> CGPoint {
+        var bounds = scrollView.contentView.bounds
+        bounds.origin = origin
+        return scrollView.contentView.constrainBoundsRect(bounds).origin
     }
 }
 
 private enum DetailScrollTarget {
-    static let top = "detail-top"
-    static let bottom = "detail-bottom"
+    static func top(for threadID: String) -> String {
+        "detail-top-\(threadID)"
+    }
+
+    static func bottom(for threadID: String) -> String {
+        "detail-bottom-\(threadID)"
+    }
 }
 
 private enum DetailScrollBoundary {
@@ -337,6 +398,24 @@ private enum DetailScrollBoundary {
 
 private final class WeakScrollViewBox {
     weak var scrollView: NSScrollView?
+}
+
+private final class WeakViewBox {
+    weak var view: NSView?
+}
+
+private struct DetailTopAnchorAccessor: NSViewRepresentable {
+    let viewBox: WeakViewBox
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        viewBox.view = view
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        viewBox.view = nsView
+    }
 }
 
 private struct DetailScrollViewAccessor: NSViewRepresentable {
