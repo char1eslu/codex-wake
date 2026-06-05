@@ -1,61 +1,50 @@
 # Codex Wake
 
-Codex Desktop currently hides chats older than about one week from the sidebar, even when the app setting says not to delete chats. The conversations are usually still on disk, but they become hard to find and continue.
+Codex Wake is a local macOS app for finding, previewing, waking, moving, trimming, branching, and backing up Codex Desktop chat sessions.
 
-Another common pain: useful chats can end up attached to the wrong project, which makes them hard to find in the right workspace later.
-
-Codex Wake is an unofficial local macOS app for browsing, searching, waking, moving, and cleaning up Codex chats. It reads the local Codex data directory, shows chats grouped by project, supports metadata search and optional deep search through JSONL transcripts, can "wake" selected chats so they appear again in the Codex sidebar, can move chats from one known project to another, and can manage the backup files it creates.
+This fork keeps the app as a dense **Liquid Glass** desktop utility while pulling in the newer session-management features from upstream.
 
 ![Codex Wake screenshot](assets/screenshot.png)
 
-## Update
+## What This Version Adds
 
-Codex Wake can now move chats between projects. Select a chat, click **Move**, choose the target project, and the app updates the local project metadata with backups first.
+- Liquid Glass three-pane UI for projects, chats, and detail preview.
+- Compact search field with an inline icon-only **Deep Search** action.
+- Multi-select chat actions with shift/command selection, context menus, keyboard navigation, and batch wake/move.
+- `Not indexed` session state when a chat exists in `state_5.sqlite` but is missing from `session_index.jsonl`.
+- Wake now repairs missing session index entries by adding the missing `session_index.jsonl` line.
+- Full-chat preview with turn-aware **Trim from here** and **Branch from here** controls.
+- Backup Manager with chat-backup restore, move-to-trash, and empty-trash actions.
+- Refresh no longer blocks on backup scans or preview parsing, reducing stuck global spinner cases.
+- SwiftPM macOS run workflow with `script/build_and_run.sh` and a Codex Run action.
+- Local `.app` bundle builds are ad-hoc signed for stricter local codesign validation.
 
-## Download
+## Core Features
 
-Download the latest macOS build from [Releases](https://github.com/nClear/codex-wake/releases).
-
-The release build is signed with a Developer ID certificate and notarized by Apple.
-
-To install it:
-
-1. Download `Codex-Wake-0.1.1-macOS.zip`.
-2. Unzip the archive.
-3. Move `Codex Wake.app` to `/Applications`.
-4. Open it.
-
-## Demo Mode
-
-Codex Wake includes a screenshot-safe demo mode with synthetic projects and chats. It does not read or write `~/.codex`.
-
-```sh
-open -n "dist/Codex Wake.app" --args --demo
-```
-
-You can also launch the app with:
-
-```sh
-CODEX_WAKE_DEMO=1 "dist/Codex Wake.app/Contents/MacOS/CodexWake"
-```
-
-## Features
-
-- Browse local Codex chat threads grouped by project.
+- Browse local Codex chats grouped by project.
 - Search by title, first message, preview text, path, or thread id.
-- Run optional deep search inside chat JSONL files.
-- Preview messages from a selected thread without opening Codex.
-- Select multiple threads, then wake, move, reveal, or copy paths in one batch.
-- Right-click a thread or selected thread group for quick actions.
-- Wake threads by updating the local metadata Codex uses for recent/sidebar visibility.
-- Move threads between known projects by updating local project metadata.
-- Create backups before every wake operation.
-- Review and delete Codex Wake backup files from the backup manager.
-- Reveal a thread JSONL file in Finder or copy its path.
+- Run deep search inside JSONL chat files when metadata search is not enough.
+- Preview chat messages without opening Codex Desktop.
+- Wake old or missing-index chats so Codex Desktop can see them again.
+- Move chats between known project folders by updating local metadata.
+- Trim a chat from a selected user message, with a backup created first.
+- Branch a new chat from an earlier Codex turn without changing the original.
+- Reveal chat JSONL files in Finder or copy their paths.
 
-## What It Reads
+## UI Notes
 
-Codex Wake reads local files from:
+The interface is intentionally work-focused:
+
+- Project sidebar shows per-project total, shown, and wake-needed counts.
+- Chat rows show title, project path, update time, and status.
+- `Not indexed` means the session row exists in SQLite but the session-index entry is missing.
+- The search field owns both normal metadata search and inline deep search.
+- Detail preview keeps message cards readable and exposes trim/branch controls at user-message boundaries.
+- Backup management stays in a Liquid Glass sheet instead of replacing the main navigation layout.
+
+## Data It Reads
+
+Codex Wake reads local Codex Desktop files:
 
 ```text
 ~/.codex/state_5.sqlite
@@ -63,33 +52,50 @@ Codex Wake reads local files from:
 ~/.codex/sessions/**/*.jsonl
 ```
 
-The app does not send chat content anywhere. There is no server component, telemetry, analytics, or network sync.
+The app has no server component and does not send chat content anywhere.
 
 ## Wake Operation
 
-When you wake a selected thread, Codex Wake creates timestamped backups and then updates only the metadata needed to make the thread look recent to Codex Desktop:
+When you wake a selected chat, Codex Wake creates backups and updates the local metadata Codex Desktop uses for recency/sidebar visibility:
 
 - `threads.thread_source = 'user'`
 - `threads.updated_at` and `threads.updated_at_ms`
 - `session_index.jsonl.updated_at`
-- the first `session_meta` line in the thread JSONL file: `timestamp` and `payload.timestamp`
+- the first `session_meta` JSONL line: `timestamp` and `payload.timestamp`
 
-The chat messages themselves are not modified.
+If the chat is missing from `session_index.jsonl`, Codex Wake appends a new index line using the existing chat title. The chat messages themselves are not changed by wake.
 
-Backups are written next to the original files with a timestamp suffix.
+Backups are written next to the original files with `.codex-rescue-backup-<timestamp>` suffixes.
 
-Use the backup manager in the sidebar toolbar to review and delete backup files created by Codex Wake.
+## Trim And Branch
 
-## Move Operation
+**Trim from here** creates a backup of the selected chat JSONL file, then removes the selected user message and everything after it. The first visible user message cannot be trimmed because Codex stores it as preview metadata.
 
-When you move a selected thread, Codex Wake creates timestamped backups and updates the project path metadata Codex uses for grouping:
+**Branch from here** creates a new chat using the conversation history before the selected Codex turn. The original chat is not changed. Codex Wake creates safety backups for local state files before registering the new branch.
 
-- `threads.cwd`
-- the first `session_meta` line in the thread JSONL file: `payload.cwd`
+## Backups And Trash
 
-After the move, Codex Wake reloads the full thread list so project counts and filters reflect the new location.
+The Backup Manager lists Codex Wake backup files with original path, size, kind, creation time, and inferred chat title where possible.
 
-## Build
+Chat file backups can be restored from the Backup Manager. Restoring replaces the current chat JSONL file with the selected restore point. The selected backup remains available.
+
+Backup files are moved to Codex Wake's app trash before permanent deletion. **Empty Trash** permanently deletes files from that app trash.
+
+## Demo Mode
+
+Demo mode uses synthetic projects and chats and does not read or write `~/.codex`.
+
+```sh
+open -n "dist/Codex Wake.app" --args --demo
+```
+
+You can also launch it with:
+
+```sh
+CODEX_WAKE_DEMO=1 "dist/Codex Wake.app/Contents/MacOS/CodexWake"
+```
+
+## Build And Run
 
 Requirements:
 
@@ -102,10 +108,28 @@ Build the executable:
 swift build
 ```
 
-Build a macOS `.app` bundle:
+Build a local `.app` bundle:
 
 ```sh
 ./scripts/build-app.sh
+```
+
+Run the app through the macOS development entrypoint:
+
+```sh
+./script/build_and_run.sh
+```
+
+Verify that the app builds, launches, and has a running process:
+
+```sh
+./script/build_and_run.sh --verify
+```
+
+Stream process logs:
+
+```sh
+./script/build_and_run.sh --logs
 ```
 
 The app bundle is written to:
@@ -114,15 +138,19 @@ The app bundle is written to:
 dist/Codex Wake.app
 ```
 
+Local bundles are ad-hoc signed so `codesign --verify --deep --strict` can validate the staged app. This is suitable for local testing. It is not Developer ID signing or notarization.
+
 ## Safety Notes
 
-Codex Wake edits local Codex metadata when you press **Wake** or **Move**. Keep Codex Desktop closed while changing old threads if you want to avoid concurrent writes.
+Codex Wake edits local Codex metadata when you press **Wake**, **Wake selected**, **Move**, **Trim from here**, **Branch from here**, or **Restore**.
 
-If something looks wrong after a wake operation, restore the backup files shown in the wake report.
+Keep Codex Desktop closed while changing old threads if you want to avoid concurrent writes.
+
+If something looks wrong after an operation, restore the relevant backup from the Backup Manager. Do not empty app trash until you are sure you no longer need those backups.
 
 ## Status
 
-Early utility. Tested on local Codex Desktop data, but the Codex storage format is private and may change.
+Early local utility. Tested against local Codex Desktop data, but Codex storage is private and can change.
 
 ## Disclaimer
 

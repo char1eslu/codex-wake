@@ -4,7 +4,7 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
     private let baseDate = Date(timeIntervalSince1970: 1_779_750_000)
     private let lock = NSLock()
     private var movedProjects: [String: String] = [:]
-    private var deletedBackupPaths: Set<String> = []
+    private var trashedBackupIDs = Set<String>()
 
     func loadThreads() throws -> [CodexThread] {
         let projects = [
@@ -58,47 +58,88 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
         .sorted { $0.updatedAt > $1.updatedAt }
     }
 
+    func loadBackups() throws -> [BackupFile] {
+        return demoBackupSamples()
+            .filter { !trashedBackupSnapshot().contains($0.id) }
+    }
+
+    func loadBackupTrash() throws -> [BackupFile] {
+        demoBackupSamples()
+            .filter { trashedBackupSnapshot().contains($0.id) }
+    }
+
+    private func demoBackupSamples() -> [BackupFile] {
+        let samples: [(String, BackupKind, Int64, Int)] = [
+            ("state_5.sqlite", .stateDatabase, 2_400_000, 1),
+            ("state_5.sqlite-wal", .stateDatabase, 180_000, 1),
+            ("session_index.jsonl", .sessionIndex, 96_000, 1),
+            ("rollout-2026-05-25T17-00-00-demo-thread-001.jsonl", .chatFile, 740_000, 1),
+            ("rollout-2026-05-24T11-30-00-demo-thread-004.jsonl", .chatFile, 510_000, 9)
+        ]
+
+        return samples.map { originalName, kind, size, hoursAgo in
+            let date = baseDate.addingTimeInterval(-Double(hoursAgo) * 60 * 60)
+            let stamp = demoBackupStamp(date)
+            let directory = kind == .chatFile ? "/Users/demo/.codex/sessions/2026/05/25" : "/Users/demo/.codex"
+            let originalPath = "\(directory)/\(originalName)"
+            return BackupFile(
+                backupPath: "\(originalPath).codex-rescue-backup-\(stamp)",
+                originalPath: originalPath,
+                originalName: originalName,
+                directory: directory,
+                stamp: stamp,
+                createdAt: date,
+                modifiedAt: date,
+                size: size,
+                kind: kind,
+                originalExists: true,
+                chatTitle: kind == .chatFile ? "Fix disappearing sidebar threads" : nil,
+                reason: kind == .chatFile ? "Created before Trim from here" : "Created by Codex Wake"
+            )
+        }
+    }
+
     func loadPreview(for thread: CodexThread) throws -> ThreadPreview {
         let messages = [
             PreviewMessage(
-                id: "demo-user-1",
                 role: "user",
                 text: thread.firstUserMessage,
-                timestamp: WakeDates.isoDemo(thread.createdAt)
+                timestamp: WakeDates.isoDemo(thread.createdAt),
+                lineNumber: 8,
+                branchLineNumber: 2,
+                isTurnStart: true,
+                isSteered: false,
+                isFirstVisibleUserMessage: true
             ),
             PreviewMessage(
-                id: "demo-agent-1",
                 role: "assistant",
-                text: """
-                I will inspect the **local metadata** shape first, then make the smallest safe change.
-
-                Plan:
-                - read `state_5.sqlite`
-                - update only the selected thread metadata
-                - verify with a fresh build
-                """,
-                timestamp: WakeDates.isoDemo(thread.createdAt.addingTimeInterval(90))
+                text: "I will inspect the local metadata shape first, then make the smallest safe change and verify it with a fresh build.",
+                timestamp: WakeDates.isoDemo(thread.createdAt.addingTimeInterval(90)),
+                lineNumber: 17,
+                branchLineNumber: nil,
+                isTurnStart: false,
+                isSteered: false,
+                isFirstVisibleUserMessage: false
             ),
             PreviewMessage(
-                id: "demo-user-2",
                 role: "user",
                 text: "Good. Keep the original files untouched, make a backup before changing anything, and show me exactly what changed.",
-                timestamp: WakeDates.isoDemo(thread.createdAt.addingTimeInterval(240))
+                timestamp: WakeDates.isoDemo(thread.createdAt.addingTimeInterval(240)),
+                lineNumber: 24,
+                branchLineNumber: 22,
+                isTurnStart: true,
+                isSteered: false,
+                isFirstVisibleUserMessage: false
             ),
             PreviewMessage(
-                id: "demo-agent-2",
                 role: "assistant",
-                text: """
-                Done. The demo data is intentionally synthetic.
-
-                ```sh
-                swift build
-                open -n "dist/Codex Wake.app" --args --demo
-                ```
-
-                Search works across titles and preview text, and write actions only update this temporary demo session.
-                """,
-                timestamp: WakeDates.isoDemo(thread.updatedAt)
+                text: "Done. The demo data is intentionally synthetic, search works across titles and preview text, and write actions only update this temporary demo session.",
+                timestamp: WakeDates.isoDemo(thread.updatedAt),
+                lineNumber: 31,
+                branchLineNumber: nil,
+                isTurnStart: false,
+                isSteered: false,
+                isFirstVisibleUserMessage: false
             )
         ]
         return ThreadPreview(threadID: thread.id, messages: messages, rawError: nil)
@@ -106,7 +147,7 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
 
     func threadContainsRawText(_ thread: CodexThread, query: String) throws -> Bool {
         let q = query.lowercased()
-        return [thread.title, thread.firstUserMessage, thread.preview, thread.cwd]
+        return [thread.sessionIndexTitle, thread.title, thread.firstUserMessage, thread.preview, thread.cwd]
             .joined(separator: "\n")
             .lowercased()
             .contains(q)
@@ -115,6 +156,31 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
     func wake(thread: CodexThread) throws -> WakeReport {
         WakeReport(
             threadID: thread.id,
+            timestamp: "demo",
+            backups: ["Demo mode does not read or write local Codex files."],
+            changedFiles: []
+        )
+    }
+
+    func trim(thread: CodexThread, fromLine lineNumber: Int) throws -> TrimReport {
+        TrimReport(
+            threadID: thread.id,
+            timestamp: "demo",
+            deletedFromLine: lineNumber,
+            removedLineCount: 3,
+            backups: ["Demo mode does not read or write local Codex files."],
+            changedFiles: []
+        )
+    }
+
+    func branch(thread: CodexThread, fromLine lineNumber: Int) throws -> BranchReport {
+        BranchReport(
+            sourceThreadID: thread.id,
+            newThreadID: "demo-branch-\(thread.id)",
+            title: "Branch: \(thread.shortTitle)",
+            createdFromLine: lineNumber,
+            keptLineCount: 2,
+            rolloutPath: "/demo/codex-wake/branch-\(thread.id).jsonl",
             timestamp: "demo",
             backups: ["Demo mode does not read or write local Codex files."],
             changedFiles: []
@@ -136,35 +202,24 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
         )
     }
 
-    func loadBackups() throws -> [BackupFile] {
-        let rows = [
-            ("state_5.sqlite.codex-rescue-backup-20260528-092500", "/Users/demo/.codex", 4_194_304, 34),
-            ("session_index.jsonl.codex-rescue-backup-20260528-092500", "/Users/demo/.codex", 91_200, 34),
-            ("thread-001.jsonl.codex-rescue-backup-20260527-184012", "/Users/demo/.codex/sessions/2026/05/27", 604_000, 49),
-            ("thread-004.jsonl.codex-rescue-backup-20260525-101604", "/Users/demo/.codex/sessions/2026/05/25", 1_432_100, 104)
-        ]
-        let deleted = deletedBackupSnapshot()
-        return rows.compactMap { name, directory, size, hoursAgo in
-            let path = directory + "/" + name
-            guard !deleted.contains(path) else { return nil }
-            let parts = name.components(separatedBy: ".codex-rescue-backup-")
-            return BackupFile(
-                path: path,
-                originalName: parts.first ?? name,
-                directory: directory,
-                stamp: parts.dropFirst().joined(separator: ".codex-rescue-backup-"),
-                size: Int64(size),
-                modifiedAt: baseDate.addingTimeInterval(-Double(hoursAgo) * 60 * 60)
-            )
+    func restoreBackup(_ backup: BackupFile) throws {
+        guard backup.kind == .chatFile else {
+            throw WakeError.commandFailed("Only chat file backups can be restored.")
         }
-        .sorted { $0.modifiedAt > $1.modifiedAt }
     }
 
-    func deleteBackups(paths: Set<String>) throws -> Int {
+    func moveBackupToTrash(_ backup: BackupFile) throws {
         lock.lock()
-        deletedBackupPaths.formUnion(paths)
+        trashedBackupIDs.insert(backup.id)
         lock.unlock()
-        return paths.count
+    }
+
+    func emptyBackupTrash() throws -> Int {
+        lock.lock()
+        let count = trashedBackupIDs.count
+        trashedBackupIDs.removeAll()
+        lock.unlock()
+        return count
     }
 
     private func samplePreview(title: String) -> String {
@@ -177,10 +232,17 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
         return movedProjects
     }
 
-    private func deletedBackupSnapshot() -> Set<String> {
+    private func trashedBackupSnapshot() -> Set<String> {
         lock.lock()
         defer { lock.unlock() }
-        return deletedBackupPaths
+        return trashedBackupIDs
+    }
+
+    private func demoBackupStamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter.string(from: date)
     }
 }
 

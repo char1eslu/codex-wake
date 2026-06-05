@@ -2,8 +2,11 @@ import SwiftUI
 import AppKit
 
 struct PreviewMessagesView: View {
+    @EnvironmentObject private var model: AppModel
     let messages: [PreviewMessage]
     private let visibleConversationLimit = 6
+    @State private var pendingTrimMessage: PreviewMessage?
+    @State private var pendingBranchMessage: PreviewMessage?
 
     private var contextMessages: [PreviewMessage] {
         messages.filter(\.isContextMessage)
@@ -34,9 +37,106 @@ struct PreviewMessagesView: View {
             }
 
             ForEach(visibleConversationMessages) { message in
+                if isUserMessage(message) {
+                    ThreadEditDivider(
+                        isTrimDisabled: model.isLoading || !message.canTrimFromHere,
+                        canBranch: message.canBranchFromHere && !model.isLoading
+                    ) {
+                        pendingTrimMessage = message
+                    } onBranch: {
+                        pendingBranchMessage = message
+                    }
+                }
                 MessagePreview(message: message)
             }
         }
+        .alert("Trim from here?", isPresented: isTrimConfirmationPresented) {
+            Button("Cancel", role: .cancel) {
+                pendingTrimMessage = nil
+            }
+            Button("Trim", role: .destructive) {
+                guard let message = pendingTrimMessage else { return }
+                pendingTrimMessage = nil
+                Task { await model.trimSelectedThread(from: message) }
+            }
+        } message: {
+            Text("This deletes this user message and everything after it from the local Codex chat file. A backup will be created first.")
+        }
+        .alert("Branch from here?", isPresented: isBranchConfirmationPresented) {
+            Button("Cancel", role: .cancel) {
+                pendingBranchMessage = nil
+            }
+            Button("Create Branch") {
+                guard let message = pendingBranchMessage else { return }
+                pendingBranchMessage = nil
+                Task { await model.branchSelectedThread(from: message) }
+            }
+        } message: {
+            Text("This creates a new Codex chat with the conversation history before this Codex turn. The original chat is not changed.")
+        }
+    }
+
+    private var isTrimConfirmationPresented: Binding<Bool> {
+        Binding(
+            get: { pendingTrimMessage != nil },
+            set: { isPresented in
+                if !isPresented {
+                    pendingTrimMessage = nil
+                }
+            }
+        )
+    }
+
+    private var isBranchConfirmationPresented: Binding<Bool> {
+        Binding(
+            get: { pendingBranchMessage != nil },
+            set: { isPresented in
+                if !isPresented {
+                    pendingBranchMessage = nil
+                }
+            }
+        )
+    }
+
+    private func isUserMessage(_ message: PreviewMessage) -> Bool {
+        message.role.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "user"
+    }
+}
+
+private struct ThreadEditDivider: View {
+    let isTrimDisabled: Bool
+    let canBranch: Bool
+    let onTrim: () -> Void
+    let onBranch: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Rectangle()
+                .fill(Color.secondary.opacity(0.22))
+                .frame(height: 1)
+            if canBranch {
+                Button {
+                    onBranch()
+                } label: {
+                    Label("Branch from here", systemImage: "arrow.branch")
+                }
+                .buttonStyle(.plain)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.accentColor)
+                .help("Create a new chat with the conversation history before this Codex turn.")
+            }
+            Button(role: .destructive) {
+                onTrim()
+            } label: {
+                Label("Trim from here", systemImage: "scissors")
+            }
+            .buttonStyle(.plain)
+            .font(.caption.weight(.semibold))
+            .disabled(isTrimDisabled)
+            .help(isTrimDisabled ? "The first visible user message cannot be trimmed." : "Delete this user message and everything after it. A backup is created first.")
+        }
+        .padding(.top, 2)
+        .padding(.bottom, -2)
     }
 }
 
@@ -162,7 +262,7 @@ private struct MessagePreview: View {
                     .padding(.vertical, 2)
 
                 MarkdownPreviewText(
-                    messageID: message.id,
+                    messageID: message.id.uuidString,
                     text: displayText,
                     isMuted: roleStyle.isContext
                 )
@@ -430,7 +530,16 @@ private struct PreviewRoleStyle {
 
     init(role: String, text: String) {
         let normalizedRole = role.lowercased()
-        let isContextMessage = PreviewMessage(id: "style", role: role, text: text, timestamp: nil).isContextMessage
+        let isContextMessage = PreviewMessage(
+            role: role,
+            text: text,
+            timestamp: nil,
+            lineNumber: nil,
+            branchLineNumber: nil,
+            isTurnStart: false,
+            isSteered: false,
+            isFirstVisibleUserMessage: false
+        ).isContextMessage
 
         isContext = isContextMessage
 

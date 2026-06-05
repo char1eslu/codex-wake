@@ -3,8 +3,10 @@ import SwiftUI
 struct BackupManagerView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
-    @State private var isConfirmingDeleteSelected = false
-    @State private var isConfirmingDeleteAll = false
+    @State private var isConfirmingTrashSelected = false
+    @State private var isConfirmingTrashAll = false
+    @State private var isConfirmingRestore = false
+    @State private var isConfirmingEmptyTrash = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -30,21 +32,37 @@ struct BackupManagerView: View {
         .task {
             await model.refreshBackups()
         }
-        .alert("Delete selected backups?", isPresented: $isConfirmingDeleteSelected) {
-            Button("Delete", role: .destructive) {
+        .alert("Move selected backups to trash?", isPresented: $isConfirmingTrashSelected) {
+            Button("Move to Trash", role: .destructive) {
                 Task { await model.deleteSelectedBackups() }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("\(model.selectedBackupIDs.count) backup files will be removed.")
+            Text("\(model.selectedBackupIDs.count) backup files will be moved to Codex Wake trash.")
         }
-        .alert("Delete all backups?", isPresented: $isConfirmingDeleteAll) {
-            Button("Delete All", role: .destructive) {
+        .alert("Move all backups to trash?", isPresented: $isConfirmingTrashAll) {
+            Button("Move All", role: .destructive) {
                 Task { await model.deleteAllBackups() }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("\(model.backups.count) backup files using \(model.backupSizeLabel) will be removed.")
+            Text("\(model.backups.count) backup files using \(model.backupSizeLabel) will be moved to Codex Wake trash.")
+        }
+        .alert("Restore selected chat backup?", isPresented: $isConfirmingRestore) {
+            Button("Restore", role: .destructive) {
+                Task { await model.restoreSelectedBackup() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The current chat JSONL file will be replaced by this backup. The backup file will stay in Backups.")
+        }
+        .alert("Empty backup trash?", isPresented: $isConfirmingEmptyTrash) {
+            Button("Empty Trash", role: .destructive) {
+                Task { await model.emptyBackupTrash() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("\(model.backupTrash.count) backup files will be permanently deleted from Codex Wake trash.")
         }
     }
 
@@ -53,7 +71,7 @@ struct BackupManagerView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Backups")
                     .font(.title3.weight(.semibold))
-                Text("\(model.backups.count) files · \(model.backupSizeLabel)")
+                Text("\(model.backups.count) files · \(model.backupSizeLabel) · Trash \(model.backupTrash.count)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -84,8 +102,16 @@ struct BackupManagerView: View {
         Table(model.backups, selection: $model.selectedBackupIDs) {
             TableColumn("Original") { backup in
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(backup.originalName)
-                        .font(.system(size: 12, weight: .medium))
+                    HStack(spacing: 6) {
+                        Image(systemName: backup.kind.systemImage)
+                            .foregroundStyle(.secondary)
+                        Text(backup.chatTitle ?? backup.originalName)
+                            .font(.system(size: 12, weight: .medium))
+                            .lineLimit(1)
+                    }
+                    Text(backup.reason)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                     Text(backup.directory)
                         .font(.caption2)
@@ -129,12 +155,19 @@ struct BackupManagerView: View {
             }
             .disabled(model.selectedBackupIDs.isEmpty)
 
+            Button {
+                isConfirmingRestore = true
+            } label: {
+                Label("Restore Chat Backup", systemImage: "arrow.counterclockwise")
+            }
+            .disabled(!canRestoreSelectedBackup)
+
             Divider()
 
             Button(role: .destructive) {
-                isConfirmingDeleteSelected = true
+                isConfirmingTrashSelected = true
             } label: {
-                Label("Delete Selected", systemImage: "trash")
+                Label("Move to Trash", systemImage: "trash")
             }
             .disabled(model.selectedBackupIDs.isEmpty)
         }
@@ -144,7 +177,7 @@ struct BackupManagerView: View {
     private var footer: some View {
         HStack(spacing: 10) {
             if model.selectedBackupIDs.isEmpty {
-                Text("Select backups to reveal, copy, or delete.")
+                Text("Select backups to reveal, copy, restore, or move to trash.")
                     .foregroundStyle(.secondary)
             } else {
                 Text("\(model.selectedBackupIDs.count) selected · \(model.selectedBackupSizeLabel)")
@@ -167,22 +200,40 @@ struct BackupManagerView: View {
             }
             .disabled(model.selectedBackupIDs.isEmpty)
 
-            Button(role: .destructive) {
-                isConfirmingDeleteSelected = true
+            Button {
+                isConfirmingRestore = true
             } label: {
-                Label("Delete Selected", systemImage: "trash")
+                Label("Restore", systemImage: "arrow.counterclockwise")
+            }
+            .disabled(!canRestoreSelectedBackup || model.isLoadingBackups)
+
+            Button(role: .destructive) {
+                isConfirmingTrashSelected = true
+            } label: {
+                Label("Move to Trash", systemImage: "trash")
             }
             .disabled(model.selectedBackupIDs.isEmpty || model.isLoadingBackups)
 
             Button(role: .destructive) {
-                isConfirmingDeleteAll = true
+                isConfirmingTrashAll = true
             } label: {
-                Label("Delete All", systemImage: "trash.slash")
+                Label("Trash All", systemImage: "trash")
             }
             .disabled(model.backups.isEmpty || model.isLoadingBackups)
+
+            Button(role: .destructive) {
+                isConfirmingEmptyTrash = true
+            } label: {
+                Label("Empty Trash", systemImage: "trash.slash")
+            }
+            .disabled(model.backupTrash.isEmpty || model.isLoadingBackups)
         }
         .font(.caption)
         .padding(12)
         .liquidGlassContainer(spacing: 10)
+    }
+
+    private var canRestoreSelectedBackup: Bool {
+        model.selectedBackups.count == 1 && model.selectedBackups.first?.kind == .chatFile
     }
 }

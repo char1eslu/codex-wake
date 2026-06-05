@@ -31,45 +31,43 @@ struct ThreadListView: View {
                             setActivePane(.threads)
                             isSearchFocused = false
                         }
-                    if !model.searchText.isEmpty {
-                        Button {
-                            model.clearSearch()
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Clear search")
-                    }
-                }
-                .padding(8)
-                .liquidGlassSurface(in: RoundedRectangle.compactLiquidGlass, interactive: true, fallbackMaterial: .thinMaterial)
+	                    if !model.searchText.isEmpty {
+	                        Button {
+	                            model.clearSearch()
+	                        } label: {
+	                            Image(systemName: "xmark.circle.fill")
+	                                .foregroundStyle(.secondary)
+	                        }
+	                        .buttonStyle(.plain)
+	                        .help("Clear search")
+	                    }
 
-                HStack(spacing: 8) {
-                    Button {
-                        model.runDeepSearch()
-                    } label: {
-                        Label("Deep Search", systemImage: "doc.text.magnifyingglass")
-                    }
-                    .liquidGlassButtonStyle()
-                    .disabled(model.isDeepSearching || model.searchText.trimmingCharacters(in: .whitespacesAndNewlines).count < 3)
-                    .help("Search inside JSONL chat files")
+	                    if model.isDeepSearching {
+	                        Button {
+	                            model.cancelDeepSearch()
+	                        } label: {
+	                            Image(systemName: "xmark")
+	                        }
+	                        .buttonStyle(.plain)
+	                        .frame(width: 24, height: 24)
+	                        .help("Cancel Deep Search")
+	                    } else {
+	                        Button {
+	                            model.runDeepSearch()
+	                        } label: {
+	                            Image(systemName: "doc.text.magnifyingglass")
+	                        }
+	                        .buttonStyle(.plain)
+	                        .frame(width: 24, height: 24)
+	                        .disabled(model.searchText.trimmingCharacters(in: .whitespacesAndNewlines).count < 3)
+	                        .help("Deep Search")
+	                    }
+	                }
+	                .padding(8)
+	                .liquidGlassSurface(in: RoundedRectangle.compactLiquidGlass, interactive: true, fallbackMaterial: .thinMaterial)
 
-                    if model.isDeepSearching {
-                        Button {
-                            model.cancelDeepSearch()
-                        } label: {
-                            Label("Cancel", systemImage: "xmark")
-                        }
-                        .liquidGlassButtonStyle()
-                    }
-
-                    Spacer()
-                }
-                .liquidGlassContainer(spacing: 8)
-
-                if model.selectedThreadCount > 1 {
-                    selectionToolbar
+	                if model.selectedThreadCount > 1 {
+	                    selectionToolbar
                 }
             }
             .padding(12)
@@ -419,7 +417,7 @@ private struct ThreadRow: View {
             HStack(spacing: 8) {
                 Label(WakeDates.display(thread.updatedAt), systemImage: "clock")
                 if thread.sessionIndexUpdatedAt == nil {
-                    Label("no index", systemImage: "exclamationmark.triangle")
+                    Label("Not indexed", systemImage: "exclamationmark.triangle")
                 }
                 Spacer()
             }

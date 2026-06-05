@@ -26,7 +26,9 @@ struct CodexThread: Identifiable, Hashable {
     var shortTitle: String {
         for candidate in [sessionIndexTitle, title, firstUserMessage] {
             let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return trimmed.oneLine.prefixString(80) }
+            if !trimmed.isEmpty {
+                return trimmed.oneLine.prefixString(80)
+            }
         }
         return id
     }
@@ -47,13 +49,13 @@ struct CodexThread: Identifiable, Hashable {
     }
 
     var isRecentlyUpdated: Bool {
-        Date().timeIntervalSince(updatedAt) < 8 * 24 * 60 * 60
+        Date().timeIntervalSince(updatedAt) < 7 * 24 * 60 * 60
     }
 
     var statusLabel: String {
         if archived { return "Archived" }
         if !fileExists { return "Missing file" }
-        if !isInSessionIndex { return "Hidden" }
+        if !isInSessionIndex { return "Not indexed" }
         if needsWake { return "Old" }
         return "Shown"
     }
@@ -72,7 +74,7 @@ struct CodexThread: Identifiable, Hashable {
 
 struct ProjectSummary: Identifiable, Hashable {
     static let allID = "__all__"
-    static let all = ProjectSummary(id: allID, name: "All Projects", path: "", totalCount: 0, hiddenCount: 0, shownCount: 0)
+    static let all = ProjectSummary(id: allID, name: "All Projects", path: "", totalCount: 0, hiddenCount: 0, shownCount: 0, latestUpdatedAt: nil)
 
     let id: String
     let name: String
@@ -80,8 +82,9 @@ struct ProjectSummary: Identifiable, Hashable {
     let totalCount: Int
     let hiddenCount: Int
     let shownCount: Int
+    let latestUpdatedAt: Date?
 
-    static func make(from threads: [CodexThread]) -> [ProjectSummary] {
+    static func make(from threads: [CodexThread], sort: ProjectSortMode = .recent) -> [ProjectSummary] {
         let grouped = Dictionary(grouping: threads, by: \.cwd)
         let projects = grouped.map { cwd, items in
             ProjectSummary(
@@ -90,12 +93,22 @@ struct ProjectSummary: Identifiable, Hashable {
                 path: cwd,
                 totalCount: items.count,
                 hiddenCount: items.filter(\.needsWake).count,
-                shownCount: items.filter(\.isShown).count
+                shownCount: items.filter(\.isShown).count,
+                latestUpdatedAt: items.map(\.updatedAt).max()
             )
         }
         .sorted { lhs, rhs in
-            if lhs.hiddenCount != rhs.hiddenCount { return lhs.hiddenCount > rhs.hiddenCount }
-            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            switch sort {
+            case .recent:
+                let lhsDate = lhs.latestUpdatedAt ?? .distantPast
+                let rhsDate = rhs.latestUpdatedAt ?? .distantPast
+                if lhsDate != rhsDate { return lhsDate > rhsDate }
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            case .name:
+                let order = lhs.name.localizedCaseInsensitiveCompare(rhs.name)
+                if order != .orderedSame { return order == .orderedAscending }
+                return (lhs.latestUpdatedAt ?? .distantPast) > (rhs.latestUpdatedAt ?? .distantPast)
+            }
         }
         let all = ProjectSummary(
             id: allID,
@@ -103,10 +116,24 @@ struct ProjectSummary: Identifiable, Hashable {
             path: "",
             totalCount: threads.count,
             hiddenCount: threads.filter(\.needsWake).count,
-            shownCount: threads.filter(\.isShown).count
+            shownCount: threads.filter(\.isShown).count,
+            latestUpdatedAt: threads.map(\.updatedAt).max()
         )
         return [all] + projects
     }
+}
+
+enum ProjectSortMode: String, CaseIterable, Identifiable {
+    case recent
+    case name
+
+    var id: String { rawValue }
+}
+
+enum AppSection {
+    case chats
+    case backups
+    case backupTrash
 }
 
 struct ThreadPreview: Identifiable {
@@ -117,10 +144,23 @@ struct ThreadPreview: Identifiable {
 }
 
 struct PreviewMessage: Identifiable, Hashable {
-    let id: String
+    let id = UUID()
     let role: String
     let text: String
     let timestamp: String?
+    let lineNumber: Int?
+    let branchLineNumber: Int?
+    let isTurnStart: Bool
+    let isSteered: Bool
+    let isFirstVisibleUserMessage: Bool
+
+    var canTrimFromHere: Bool {
+        (lineNumber ?? 0) > 1 && !isFirstVisibleUserMessage
+    }
+
+    var canBranchFromHere: Bool {
+        isTurnStart && (branchLineNumber ?? 0) > 2
+    }
 
     var isContextMessage: Bool {
         let normalizedRole = role.lowercased()
@@ -131,15 +171,34 @@ struct PreviewMessage: Identifiable, Hashable {
             || normalizedText.hasPrefix("<permissions instructions>")
             || normalizedText.hasPrefix("<app-context>")
     }
-
-    func withID(_ id: String) -> PreviewMessage {
-        PreviewMessage(id: id, role: role, text: text, timestamp: timestamp)
-    }
 }
 
 struct WakeReport: Identifiable {
     let id = UUID()
     let threadID: String
+    let timestamp: String
+    let backups: [String]
+    let changedFiles: [String]
+}
+
+struct TrimReport: Identifiable {
+    let id = UUID()
+    let threadID: String
+    let timestamp: String
+    let deletedFromLine: Int
+    let removedLineCount: Int
+    let backups: [String]
+    let changedFiles: [String]
+}
+
+struct BranchReport: Identifiable {
+    let id = UUID()
+    let sourceThreadID: String
+    let newThreadID: String
+    let title: String
+    let createdFromLine: Int
+    let keptLineCount: Int
+    let rolloutPath: String
     let timestamp: String
     let backups: [String]
     let changedFiles: [String]
@@ -166,20 +225,89 @@ struct OperationReport: Identifiable {
     let failures: [String]
 }
 
-struct BackupFile: Identifiable, Hashable {
-    var id: String { path }
+struct BatchWakeReport: Identifiable {
+    let id = UUID()
+    let completedAt: Date
+    let requestedCount: Int
+    let succeeded: [BatchWakeSuccess]
+    let skipped: [BatchWakeSkipped]
+    let failed: [BatchWakeFailure]
 
-    let path: String
+    var backupCount: Int {
+        succeeded.reduce(0) { $0 + $1.backupCount }
+    }
+}
+
+struct BatchWakeSuccess: Identifiable, Hashable {
+    let threadID: String
+    let title: String
+    let backupCount: Int
+
+    var id: String { threadID }
+}
+
+struct BatchWakeSkipped: Identifiable, Hashable {
+    let threadID: String
+    let title: String
+    let reason: String
+
+    var id: String { threadID }
+}
+
+struct BatchWakeFailure: Identifiable, Hashable {
+    let threadID: String
+    let title: String
+    let message: String
+
+    var id: String { threadID }
+}
+
+struct BackupFile: Identifiable, Hashable {
+    var id: String { backupPath }
+
+    let backupPath: String
+    let originalPath: String
     let originalName: String
     let directory: String
     let stamp: String
+    let createdAt: Date?
+    let modifiedAt: Date?
     let size: Int64
-    let modifiedAt: Date
+    let kind: BackupKind
+    let originalExists: Bool
+    let chatTitle: String?
+    let reason: String
 
-    var url: URL { URL(fileURLWithPath: path) }
+    var path: String { backupPath }
+    var url: URL { URL(fileURLWithPath: backupPath) }
 
     var sizeLabel: String {
         ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+    }
+}
+
+enum BackupKind: String, Hashable {
+    case stateDatabase
+    case sessionIndex
+    case chatFile
+    case other
+
+    var label: String {
+        switch self {
+        case .stateDatabase: return "State DB"
+        case .sessionIndex: return "Session index"
+        case .chatFile: return "Chat file"
+        case .other: return "Other"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .stateDatabase: return "cylinder.split.1x2"
+        case .sessionIndex: return "list.bullet.rectangle"
+        case .chatFile: return "text.bubble"
+        case .other: return "doc"
+        }
     }
 }
 

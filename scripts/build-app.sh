@@ -26,4 +26,6 @@ if [[ -f "$ROOT_DIR/Resources/AppIcon.icns" ]]; then
   cp "$ROOT_DIR/Resources/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
 fi
 
+/usr/bin/codesign --force --deep --sign - "$APP_DIR"
+
 echo "$APP_DIR"

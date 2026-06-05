@@ -20,6 +20,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var threads: [CodexThread] = []
     @Published private(set) var filteredThreads: [CodexThread] = []
     @Published private(set) var backups: [BackupFile] = []
+    @Published private(set) var backupTrash: [BackupFile] = []
     @Published private(set) var isLoadingBackups = false
     @Published var preview: ThreadPreview?
     @Published private(set) var isPreviewLoading = false
@@ -120,7 +121,7 @@ final class AppModel: ObservableObject {
             applyFilters()
             status = isDemoMode ? "Loaded \(loaded.count) demo chats" : "Loaded \(loaded.count) chats"
             if let selectedThreadID {
-                await loadPreview(threadID: selectedThreadID)
+                startPreviewLoad(threadID: selectedThreadID)
             } else {
                 cancelPreviewLoad(clearPreview: true)
             }
@@ -385,11 +386,15 @@ final class AppModel: ObservableObject {
         do {
             let store = self.store
             let loaded = try await Task.detached(priority: .userInitiated) {
-                try store.loadBackups()
+                (
+                    backups: try store.loadBackups(),
+                    backupTrash: try store.loadBackupTrash()
+                )
             }.value
-            backups = loaded
-            selectedBackupIDs = selectedBackupIDs.intersection(Set(loaded.map(\.id)))
-            status = loaded.isEmpty ? "No backups found" : "Found \(loaded.count) backups"
+            backups = loaded.backups
+            backupTrash = loaded.backupTrash
+            selectedBackupIDs = selectedBackupIDs.intersection(Set(loaded.backups.map(\.id)))
+            status = loaded.backups.isEmpty ? "No backups found" : "Found \(loaded.backups.count) backups"
         } catch {
             errorMessage = Self.readable(error)
             status = "Backup scan failed"
@@ -397,30 +402,85 @@ final class AppModel: ObservableObject {
     }
 
     func deleteSelectedBackups() async {
-        await deleteBackups(paths: selectedBackupIDs)
+        await moveBackupsToTrash(ids: selectedBackupIDs)
     }
 
     func deleteAllBackups() async {
-        await deleteBackups(paths: Set(backups.map(\.id)))
+        await moveBackupsToTrash(ids: Set(backups.map(\.id)))
     }
 
     func deleteBackups(paths: Set<String>) async {
-        guard !paths.isEmpty else { return }
+        await moveBackupsToTrash(ids: paths)
+    }
+
+    func moveBackupsToTrash(ids: Set<String>) async {
+        let targets = backups.filter { ids.contains($0.id) }
+        guard !targets.isEmpty else { return }
+        isLoadingBackups = true
+        errorMessage = nil
+        defer { isLoadingBackups = false }
+
+        let store = self.store
+        let result = await Task.detached(priority: .userInitiated) {
+            var moved = 0
+            var failures: [String] = []
+            for backup in targets {
+                do {
+                    try store.moveBackupToTrash(backup)
+                    moved += 1
+                } catch {
+                    failures.append("\(backup.originalName): \(Self.readable(error))")
+                }
+            }
+            return (moved: moved, failures: failures)
+        }.value
+
+        selectedBackupIDs.subtract(ids)
+        await refreshBackups()
+        if result.failures.isEmpty {
+            status = "Moved \(result.moved) backups to trash"
+        } else {
+            errorMessage = result.failures.joined(separator: "\n")
+            status = "Moved \(result.moved) backups, \(result.failures.count) failed"
+        }
+    }
+
+    func restoreSelectedBackup() async {
+        guard let backup = selectedBackups.first else { return }
         isLoadingBackups = true
         errorMessage = nil
         defer { isLoadingBackups = false }
 
         do {
             let store = self.store
-            let deletedCount = try await Task.detached(priority: .userInitiated) {
-                try store.deleteBackups(paths: paths)
+            try await Task.detached(priority: .userInitiated) {
+                try store.restoreBackup(backup)
             }.value
-            backups.removeAll { paths.contains($0.id) }
-            selectedBackupIDs.subtract(paths)
-            status = "Deleted \(deletedCount) backups"
+            status = "Restored \(backup.originalName)"
+            await refresh()
         } catch {
             errorMessage = Self.readable(error)
-            status = "Backup delete failed"
+            status = "Restore failed"
+        }
+    }
+
+    func emptyBackupTrash() async {
+        guard !backupTrash.isEmpty else { return }
+        isLoadingBackups = true
+        errorMessage = nil
+        defer { isLoadingBackups = false }
+
+        do {
+            let store = self.store
+            let removed = try await Task.detached(priority: .userInitiated) {
+                try store.emptyBackupTrash()
+            }.value
+            backupTrash.removeAll()
+            status = "Deleted \(removed) backup files"
+            await refreshBackups()
+        } catch {
+            errorMessage = Self.readable(error)
+            status = "Empty trash failed"
         }
     }
 
@@ -440,6 +500,76 @@ final class AppModel: ObservableObject {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(paths.joined(separator: "\n"), forType: .string)
         status = paths.count == 1 ? "Backup path copied" : "\(paths.count) backup paths copied"
+    }
+
+    func trimSelectedThread(from message: PreviewMessage) async {
+        guard let thread = selectedThread, let lineNumber = message.lineNumber else { return }
+        guard message.canTrimFromHere else {
+            status = "Cannot trim the first visible user message"
+            return
+        }
+
+        isLoading = true
+        status = "Trimming chat..."
+        errorMessage = nil
+        operationReport = nil
+        defer { isLoading = false }
+
+        do {
+            let store = self.store
+            let report = try await Task.detached(priority: .userInitiated) {
+                try store.trim(thread: thread, fromLine: lineNumber)
+            }.value
+            operationReport = OperationReport(
+                title: "Trim complete",
+                threadIDs: [report.threadID],
+                timestamp: WakeDates.displayBackupStamp(report.timestamp),
+                summary: "Removed \(report.removedLineCount) lines from line \(report.deletedFromLine)",
+                backups: report.backups,
+                changedFiles: report.changedFiles,
+                failures: []
+            )
+            status = "Trim complete"
+            invalidatePreviewCache(for: [thread.id])
+            await refresh()
+            setSelection([thread.id], preferredID: thread.id, shouldLoadPreview: true)
+        } catch {
+            errorMessage = Self.readable(error)
+            status = "Trim failed"
+        }
+    }
+
+    func branchSelectedThread(from message: PreviewMessage) async {
+        guard let thread = selectedThread, let lineNumber = message.branchLineNumber else { return }
+
+        isLoading = true
+        status = "Creating chat branch..."
+        errorMessage = nil
+        operationReport = nil
+        defer { isLoading = false }
+
+        do {
+            let store = self.store
+            let report = try await Task.detached(priority: .userInitiated) {
+                try store.branch(thread: thread, fromLine: lineNumber)
+            }.value
+            operationReport = OperationReport(
+                title: "Branch created",
+                threadIDs: [report.newThreadID],
+                timestamp: WakeDates.displayBackupStamp(report.timestamp),
+                summary: "Created \(report.title) with \(report.keptLineCount) kept lines",
+                backups: report.backups,
+                changedFiles: report.changedFiles,
+                failures: []
+            )
+            status = "Branch created"
+            await refresh()
+            selectedProjectID = thread.cwd
+            setSelection([report.newThreadID], preferredID: report.newThreadID, shouldLoadPreview: true)
+        } catch {
+            errorMessage = Self.readable(error)
+            status = "Branch failed"
+        }
     }
 
     func runDeepSearch() {

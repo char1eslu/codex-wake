@@ -6,16 +6,14 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
     private let codexHome: URL
     private let stateDB: URL
     private let sessionIndex: URL
-    private let backupMarker = ".codex-rescue-backup-"
-    private let previewReadLimit = 2 * 1024 * 1024
-    private let previewContextLimit = 6
-    private let previewRecentMessageLimit = 24
+    private let backupTrash: URL
 
     init(codexHome: URL? = nil) {
         let home = codexHome ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
         self.codexHome = home
         self.stateDB = home.appendingPathComponent("state_5.sqlite")
         self.sessionIndex = home.appendingPathComponent("session_index.jsonl")
+        self.backupTrash = home.appendingPathComponent(".codex-wake-trash", isDirectory: true)
     }
 
     func loadThreads() throws -> [CodexThread] {
@@ -52,40 +50,217 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         .sorted { $0.updatedAt > $1.updatedAt }
     }
 
+    func loadBackups() throws -> [BackupFile] {
+        guard fileManager.fileExists(atPath: codexHome.path) else { throw WakeError.missingCodexHome(codexHome) }
+        return try scanBackups(in: codexHome, includeTrash: false).filter(isMainBackup)
+    }
+
+    func loadBackupTrash() throws -> [BackupFile] {
+        guard fileManager.fileExists(atPath: backupTrash.path) else { return [] }
+        return try scanBackups(in: backupTrash, includeTrash: true)
+    }
+
+    private func scanBackups(in root: URL, includeTrash: Bool) throws -> [BackupFile] {
+        let marker = ".codex-rescue-backup-"
+        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+        let options: FileManager.DirectoryEnumerationOptions = includeTrash
+            ? [.skipsPackageDescendants]
+            : [.skipsPackageDescendants, .skipsHiddenFiles]
+        guard let enumerator = fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: keys,
+            options: options
+        ) else {
+            return []
+        }
+
+        let sessionIndexEntries = (try? loadSessionIndex()) ?? [:]
+        var backups: [BackupFile] = []
+        for case let url as URL in enumerator {
+            if !includeTrash && url.path.hasPrefix(backupTrash.path + "/") { continue }
+            let fileName = url.lastPathComponent
+            guard let markerRange = fileName.range(of: marker) else { continue }
+
+            let originalName = String(fileName[..<markerRange.lowerBound])
+            let stamp = String(fileName[markerRange.upperBound...])
+            guard !originalName.isEmpty, !stamp.isEmpty else { continue }
+
+            let values = try? url.resourceValues(forKeys: Set(keys))
+            if values?.isRegularFile == false { continue }
+
+            let directoryURL = url.deletingLastPathComponent()
+            let originalDirectoryURL: URL
+            if includeTrash {
+                let relativeDirectory = String(directoryURL.path.dropFirst(backupTrash.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                originalDirectoryURL = relativeDirectory.isEmpty
+                    ? codexHome
+                    : codexHome.appendingPathComponent(relativeDirectory, isDirectory: true)
+            } else {
+                originalDirectoryURL = directoryURL
+            }
+            let originalURL = originalDirectoryURL.appendingPathComponent(originalName)
+            let kind = backupKind(for: originalName)
+            let chatTitle = kind == .chatFile ? backupChatTitle(from: url, sessionIndex: sessionIndexEntries) : nil
+            backups.append(
+                BackupFile(
+                    backupPath: url.path,
+                    originalPath: originalURL.path,
+                    originalName: originalName,
+                    directory: directoryURL.path,
+                    stamp: stamp,
+                    createdAt: WakeDates.dateFromBackupStamp(stamp),
+                    modifiedAt: values?.contentModificationDate,
+                    size: Int64(values?.fileSize ?? 0),
+                    kind: kind,
+                    originalExists: fileManager.fileExists(atPath: originalURL.path),
+                    chatTitle: chatTitle,
+                    reason: backupReason(for: stamp, kind: kind)
+                )
+            )
+        }
+
+        return backups.sorted { lhs, rhs in
+            let lhsDate = lhs.createdAt ?? lhs.modifiedAt ?? .distantPast
+            let rhsDate = rhs.createdAt ?? rhs.modifiedAt ?? .distantPast
+            if lhsDate != rhsDate { return lhsDate > rhsDate }
+            return lhs.backupPath.localizedCaseInsensitiveCompare(rhs.backupPath) == .orderedAscending
+        }
+    }
+
+    func moveBackupToTrash(_ backup: BackupFile) throws {
+        let source = URL(fileURLWithPath: backup.backupPath).standardizedFileURL
+        guard source.path.hasPrefix(codexHome.standardizedFileURL.path + "/"),
+              source.lastPathComponent.contains(".codex-rescue-backup-")
+        else {
+            throw WakeError.commandFailed("Refusing to move non-Codex-Wake backup file")
+        }
+
+        let sourceDirectory = source.deletingLastPathComponent()
+        let relativeDirectory = String(sourceDirectory.path.dropFirst(codexHome.standardizedFileURL.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let destinationDirectory = relativeDirectory.isEmpty
+            ? backupTrash
+            : backupTrash.appendingPathComponent(relativeDirectory, isDirectory: true)
+        try fileManager.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
+        let destination = uniqueTrashURL(for: source.lastPathComponent, in: destinationDirectory)
+        try fileManager.moveItem(at: source, to: destination)
+    }
+
+    func restoreBackup(_ backupFile: BackupFile) throws {
+        guard backupFile.kind == .chatFile else {
+            throw WakeError.commandFailed("Only chat file backups can be restored.")
+        }
+
+        let backupURL = URL(fileURLWithPath: backupFile.backupPath).standardizedFileURL
+        let originalURL = URL(fileURLWithPath: backupFile.originalPath).standardizedFileURL
+        guard backupURL.path.hasPrefix(codexHome.standardizedFileURL.path + "/"),
+              backupURL.lastPathComponent.contains(".codex-rescue-backup-")
+        else {
+            throw WakeError.commandFailed("Refusing to restore non-Codex-Wake backup file.")
+        }
+        guard fileManager.fileExists(atPath: backupURL.path) else {
+            throw WakeError.commandFailed("Backup file no longer exists.")
+        }
+
+        try fileManager.createDirectory(at: originalURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        let temporaryURL = originalURL
+            .deletingLastPathComponent()
+            .appendingPathComponent(".\(originalURL.lastPathComponent).codex-wake-restore-\(backupStamp())")
+        if fileManager.fileExists(atPath: temporaryURL.path) {
+            try fileManager.removeItem(at: temporaryURL)
+        }
+        try fileManager.copyItem(at: backupURL, to: temporaryURL)
+        defer { try? fileManager.removeItem(at: temporaryURL) }
+
+        if fileManager.fileExists(atPath: originalURL.path) {
+            _ = try fileManager.replaceItemAt(originalURL, withItemAt: temporaryURL)
+        } else {
+            try fileManager.moveItem(at: temporaryURL, to: originalURL)
+        }
+    }
+
+    func emptyBackupTrash() throws -> Int {
+        guard fileManager.fileExists(atPath: backupTrash.path) else { return 0 }
+        let keys: [URLResourceKey] = [.isRegularFileKey]
+        guard let enumerator = fileManager.enumerator(
+            at: backupTrash,
+            includingPropertiesForKeys: keys,
+            options: [.skipsPackageDescendants]
+        ) else {
+            return 0
+        }
+
+        var removed = 0
+        for case let url as URL in enumerator {
+            let standardized = url.standardizedFileURL
+            guard standardized.path.hasPrefix(backupTrash.standardizedFileURL.path + "/"),
+                  standardized.lastPathComponent.contains(".codex-rescue-backup-")
+            else { continue }
+
+            let values = try? standardized.resourceValues(forKeys: Set(keys))
+            guard values?.isRegularFile != false else { continue }
+            try fileManager.removeItem(at: standardized)
+            removed += 1
+        }
+        return removed
+    }
+
     func loadPreview(for thread: CodexThread) throws -> ThreadPreview {
         guard fileManager.fileExists(atPath: thread.rolloutPath) else {
             throw WakeError.missingThreadFile(thread.rolloutPath)
         }
 
-        let previewLines = try readPreviewLines(from: URL(fileURLWithPath: thread.rolloutPath), maxBytes: previewReadLimit)
-        var contextMessages: [PreviewMessage] = []
-        var recentMessages: [PreviewMessage] = []
+        let content = try String(contentsOf: URL(fileURLWithPath: thread.rolloutPath), encoding: .utf8)
+        var messages: [PreviewMessage] = []
+        var currentTurnStartLine: Int?
+        var hasVisibleUserMessageInTurn = false
+        var visibleUserMessageCount = 0
+        var pendingTurnComplete: PreviewMessage?
+        for (index, line) in content.split(separator: "\n", omittingEmptySubsequences: true).enumerated() {
+            guard let data = String(line).data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+            let lineNumber = index + 1
 
-        for line in previewLines.prefixLines.enumerated() {
-            guard contextMessages.count < previewContextLimit else { break }
-            guard let message = decodePreviewMessage(line.element, fallbackID: "prefix-\(line.offset)") else { continue }
-            guard message.isContextMessage else { continue }
-            contextMessages.append(message.withID("context-\(contextMessages.count)-\(message.id)"))
-        }
+            if let eventType = (obj["payload"] as? [String: Any])?["type"] as? String {
+                if obj["type"] as? String == "event_msg", eventType == "task_started" {
+                    currentTurnStartLine = lineNumber
+                    hasVisibleUserMessageInTurn = false
+                    pendingTurnComplete = nil
+                } else if obj["type"] as? String == "event_msg", eventType == "task_complete" {
+                    if let pendingTurnComplete {
+                        messages.append(pendingTurnComplete)
+                    }
+                    currentTurnStartLine = nil
+                    hasVisibleUserMessageInTurn = false
+                    pendingTurnComplete = nil
+                    continue
+                }
+            }
 
-        for line in previewLines.suffixLines.enumerated() {
-            guard var message = decodePreviewMessage(line.element, fallbackID: "suffix-\(line.offset)") else { continue }
-            guard !message.isContextMessage else { continue }
-            message = message.withID("recent-\(line.offset)-\(message.id)")
-            recentMessages.append(message)
-            if recentMessages.count > previewRecentMessageLimit {
-                recentMessages.removeFirst(recentMessages.count - previewRecentMessageLimit)
+            let isTurnStartMessage = currentTurnStartLine != nil && !hasVisibleUserMessageInTurn
+            let branchLineNumber = isTurnStartMessage ? currentTurnStartLine : nil
+            if let message = extractMessage(
+                from: obj,
+                lineNumber: lineNumber,
+                branchLineNumber: branchLineNumber,
+                isTurnStart: isTurnStartMessage,
+                isSteered: !isTurnStartMessage && isUserObject(obj),
+                isFirstVisibleUserMessage: isUserObject(obj) && visibleUserMessageCount == 0
+            ) {
+                if message.role.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "assistant" {
+                    pendingTurnComplete = message
+                    continue
+                }
+                messages.append(message)
+                if message.role.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "user" {
+                    visibleUserMessageCount += 1
+                    hasVisibleUserMessageInTurn = true
+                }
             }
         }
 
-        return ThreadPreview(threadID: thread.id, messages: contextMessages + recentMessages, rawError: nil)
-    }
-
-    private func decodePreviewMessage(_ line: String, fallbackID: String) -> PreviewMessage? {
-            guard let data = line.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { return nil }
-            return extractMessage(from: obj, fallbackID: fallbackID)
+        return ThreadPreview(threadID: thread.id, messages: messages, rawError: nil)
     }
 
     func threadContainsRawText(_ thread: CodexThread, query: String) throws -> Bool {
@@ -110,25 +285,153 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         }
 
         let stamp = backupStamp()
+        let backupSuffix = "\(stamp)-wake"
         var backups: [String] = []
         var changed: [String] = []
 
-        backups += try backupStateFiles(stamp: stamp)
-        backups.append(try backup(sessionIndex, suffix: stamp).path)
-        backups.append(try backup(thread.rolloutURL, suffix: stamp).path)
+        backups += try backupStateFiles(stamp: backupSuffix)
+        backups.append(try backup(sessionIndex, suffix: backupSuffix).path)
+        backups.append(try backup(thread.rolloutURL, suffix: backupSuffix).path)
 
         let nowSeconds = Int64(Date().timeIntervalSince1970)
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         try updateSQLite(threadID: thread.id, updatedAt: nowSeconds, updatedAtMs: nowMs)
         changed.append(stateDB.path)
 
-        try updateSessionIndex(threadID: thread.id, updatedAt: WakeDates.isoNowForIndex())
+        try upsertSessionIndex(threadID: thread.id, title: thread.shortTitle, updatedAt: WakeDates.isoNowForIndex())
         changed.append(sessionIndex.path)
 
         try updateSessionMeta(path: thread.rolloutURL, timestamp: WakeDates.isoNowForJSONL())
         changed.append(thread.rolloutPath)
 
         return WakeReport(threadID: thread.id, timestamp: stamp, backups: backups, changedFiles: changed)
+    }
+
+    func trim(thread: CodexThread, fromLine lineNumber: Int) throws -> TrimReport {
+        guard fileManager.fileExists(atPath: thread.rolloutPath) else {
+            throw WakeError.missingThreadFile(thread.rolloutPath)
+        }
+        guard lineNumber > 1 else {
+            throw WakeError.commandFailed("Cannot trim before the first JSONL line.")
+        }
+
+        let stamp = backupStamp()
+        let rolloutURL = thread.rolloutURL
+        let backupPath = try backup(rolloutURL, suffix: "\(stamp)-trim").path
+
+        let content = try String(contentsOf: rolloutURL, encoding: .utf8)
+        var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if lines.last == "" {
+            lines.removeLast()
+        }
+        guard lineNumber <= lines.count else {
+            throw WakeError.commandFailed("Trim line is outside the chat file.")
+        }
+
+        let keptLines = Array(lines.prefix(lineNumber - 1))
+        let removedLineCount = lines.count - keptLines.count
+        let trimmedContent = keptLines.joined(separator: "\n") + "\n"
+        try trimmedContent.write(to: rolloutURL, atomically: true, encoding: .utf8)
+
+        return TrimReport(
+            threadID: thread.id,
+            timestamp: stamp,
+            deletedFromLine: lineNumber,
+            removedLineCount: removedLineCount,
+            backups: [backupPath],
+            changedFiles: [thread.rolloutPath]
+        )
+    }
+
+    func branch(thread: CodexThread, fromLine lineNumber: Int) throws -> BranchReport {
+        guard fileManager.fileExists(atPath: thread.rolloutPath) else {
+            throw WakeError.missingThreadFile(thread.rolloutPath)
+        }
+        guard lineNumber > 1 else {
+            throw WakeError.commandFailed("Cannot branch before the first JSONL line.")
+        }
+
+        let content = try String(contentsOf: thread.rolloutURL, encoding: .utf8)
+        var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if lines.last == "" {
+            lines.removeLast()
+        }
+        guard lineNumber <= lines.count else {
+            throw WakeError.commandFailed("Branch line is outside the chat file.")
+        }
+
+        let keptLines = Array(lines.prefix(lineNumber - 1))
+        guard !keptLines.isEmpty else {
+            throw WakeError.commandFailed("Branch would create an empty chat.")
+        }
+
+        let stamp = backupStamp()
+        let now = Date()
+        let nowSeconds = Int64(now.timeIntervalSince1970)
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+        let nowJSONL = WakeDates.isoNowForJSONL()
+        let nowIndex = WakeDates.isoNowForIndex()
+        let newThreadID = try uniqueThreadID()
+        let newTitle = branchTitle(for: thread)
+        let newRolloutURL = codexHome
+            .appendingPathComponent("sessions", isDirectory: true)
+            .appendingPathComponent(branchDatePath(now), isDirectory: true)
+            .appendingPathComponent("rollout-\(branchFileTimestamp(now))-\(newThreadID).jsonl")
+
+        var backups: [String] = []
+        var changed: [String] = []
+        backups += try backupStateFiles(stamp: "\(stamp)-branch")
+        backups.append(try backup(sessionIndex, suffix: "\(stamp)-branch").path)
+
+        let branchedContent = try branchContent(
+            from: keptLines,
+            newThreadID: newThreadID,
+            timestamp: nowJSONL,
+            cwd: thread.cwd
+        )
+        try fileManager.createDirectory(at: newRolloutURL.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
+        var insertedSQLiteRow = false
+        do {
+            try branchedContent.write(to: newRolloutURL, atomically: true, encoding: .utf8)
+            changed.append(newRolloutURL.path)
+
+            try insertBranchedSQLiteRow(
+                sourceThreadID: thread.id,
+                newThreadID: newThreadID,
+                rolloutPath: newRolloutURL.path,
+                title: newTitle,
+                createdAt: nowSeconds,
+                updatedAt: nowSeconds,
+                createdAtMs: nowMs,
+                updatedAtMs: nowMs
+            )
+            insertedSQLiteRow = true
+            try verifyBranchedSQLiteRow(threadID: newThreadID)
+            changed.append(stateDB.path)
+
+            try appendSessionIndex(threadID: newThreadID, title: newTitle, updatedAt: nowIndex)
+            changed.append(sessionIndex.path)
+        } catch {
+            if insertedSQLiteRow {
+                try? deleteBranchedSQLiteRow(threadID: newThreadID)
+            }
+            if fileManager.fileExists(atPath: newRolloutURL.path) {
+                try? fileManager.removeItem(at: newRolloutURL)
+            }
+            throw error
+        }
+
+        return BranchReport(
+            sourceThreadID: thread.id,
+            newThreadID: newThreadID,
+            title: newTitle,
+            createdFromLine: lineNumber,
+            keptLineCount: keptLines.count,
+            rolloutPath: newRolloutURL.path,
+            timestamp: stamp,
+            backups: backups,
+            changedFiles: changed
+        )
     }
 
     func move(thread: CodexThread, to project: ProjectSummary) throws -> MoveReport {
@@ -140,11 +443,12 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         }
 
         let stamp = backupStamp()
+        let backupSuffix = "\(stamp)-move"
         var backups: [String] = []
         var changed: [String] = []
 
-        backups += try backupStateFiles(stamp: stamp)
-        backups.append(try backup(thread.rolloutURL, suffix: stamp).path)
+        backups += try backupStateFiles(stamp: backupSuffix)
+        backups.append(try backup(thread.rolloutURL, suffix: backupSuffix).path)
 
         try updateSQLiteProject(threadID: thread.id, cwd: project.path)
         changed.append(stateDB.path)
@@ -160,58 +464,6 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
             backups: backups,
             changedFiles: changed
         )
-    }
-
-    func loadBackups() throws -> [BackupFile] {
-        guard fileManager.fileExists(atPath: codexHome.path) else { throw WakeError.missingCodexHome(codexHome) }
-
-        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
-        guard let enumerator = fileManager.enumerator(
-            at: codexHome,
-            includingPropertiesForKeys: Array(keys),
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
-        ) else { return [] }
-
-        var backups: [BackupFile] = []
-        for case let url as URL in enumerator {
-            guard url.lastPathComponent.contains(backupMarker) else { continue }
-            let values = try url.resourceValues(forKeys: keys)
-            guard values.isRegularFile == true else { continue }
-
-            let parts = url.lastPathComponent.components(separatedBy: backupMarker)
-            guard parts.count >= 2 else { continue }
-
-            backups.append(
-                BackupFile(
-                    path: url.path,
-                    originalName: parts[0],
-                    directory: url.deletingLastPathComponent().path,
-                    stamp: parts.dropFirst().joined(separator: backupMarker),
-                    size: Int64(values.fileSize ?? 0),
-                    modifiedAt: values.contentModificationDate ?? .distantPast
-                )
-            )
-        }
-
-        return backups.sorted { lhs, rhs in
-            if lhs.modifiedAt != rhs.modifiedAt { return lhs.modifiedAt > rhs.modifiedAt }
-            return lhs.path.localizedCaseInsensitiveCompare(rhs.path) == .orderedAscending
-        }
-    }
-
-    func deleteBackups(paths: Set<String>) throws -> Int {
-        guard !paths.isEmpty else { return 0 }
-        let codexHomePath = codexHome.standardizedFileURL.path
-        var deleted = 0
-        for path in paths {
-            guard path.contains(backupMarker) else { continue }
-            let standardizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
-            guard standardizedPath == codexHomePath || standardizedPath.hasPrefix(codexHomePath + "/") else { continue }
-            guard fileManager.fileExists(atPath: path) else { continue }
-            try fileManager.removeItem(atPath: path)
-            deleted += 1
-        }
-        return deleted
     }
 
     private func loadThreadRows() throws -> [ThreadRow] {
@@ -264,6 +516,87 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
             )
         }
         return rows
+    }
+
+    private func backupKind(for originalName: String) -> BackupKind {
+        if originalName == "state_5.sqlite" || originalName.hasPrefix("state_5.sqlite-") {
+            return .stateDatabase
+        }
+        if originalName == "session_index.jsonl" {
+            return .sessionIndex
+        }
+        if originalName.hasSuffix(".jsonl") {
+            return .chatFile
+        }
+        return .other
+    }
+
+    private func backupReason(for stamp: String, kind: BackupKind) -> String {
+        if stamp.contains("-trim") {
+            return "Created before Trim from here"
+        }
+        if stamp.contains("-before-restore") {
+            return "Created before Restore"
+        }
+        if stamp.contains("-wake") {
+            return "Created before Wake"
+        }
+        if stamp.contains("-move") {
+            return "Created before Move"
+        }
+        if kind == .chatFile {
+            return "Created before a chat change (legacy backup)"
+        }
+        return "Created by Codex Wake"
+    }
+
+    private func isMainBackup(_ backup: BackupFile) -> Bool {
+        guard backup.kind == .chatFile else { return false }
+        if backup.stamp.contains("-wake") || backup.stamp.contains("-move") {
+            return false
+        }
+        return true
+    }
+
+    private func backupChatTitle(from url: URL, sessionIndex: [String: SessionIndexEntry]) -> String? {
+        guard let prefix = try? readPrefix(of: url, maxBytes: 512 * 1024) else { return nil }
+        if let id = firstCapture(in: prefix, pattern: #""payload":\{"id":"([^"]+)""#),
+           let title = sessionIndex[id]?.thread_name?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !title.isEmpty {
+            return title.oneLine.prefixString(100)
+        }
+
+        for line in prefix.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard let data = String(line).data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let message = extractMessage(
+                    from: obj,
+                    lineNumber: 0,
+                    branchLineNumber: nil,
+                    isTurnStart: false,
+                    isSteered: false,
+                    isFirstVisibleUserMessage: false
+                  ),
+                  message.role.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "user"
+            else { continue }
+            return message.text.oneLine.prefixString(100)
+        }
+
+        return nil
+    }
+
+    private func uniqueTrashURL(for fileName: String, in directory: URL) -> URL {
+        var destination = directory.appendingPathComponent(fileName)
+        guard fileManager.fileExists(atPath: destination.path) else { return destination }
+
+        let suffix = backupStamp()
+        destination = directory.appendingPathComponent("\(fileName).trashed-\(suffix)")
+        var counter = 2
+        while fileManager.fileExists(atPath: destination.path) {
+            destination = directory.appendingPathComponent("\(fileName).trashed-\(suffix)-\(counter)")
+            counter += 1
+        }
+        return destination
     }
 
     private func text(_ statement: OpaquePointer, _ index: Int32) -> String {
@@ -320,34 +653,6 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         return String(data: data, encoding: .utf8) ?? ""
     }
 
-    private func readPreviewLines(from url: URL, maxBytes: Int) throws -> (prefixLines: [String], suffixLines: [String]) {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-
-        let attributes = try fileManager.attributesOfItem(atPath: url.path)
-        let fileSize = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
-
-        let prefixText = String(data: handle.readData(ofLength: min(maxBytes, Int(fileSize))), encoding: .utf8) ?? ""
-
-        let suffixText: String
-        if fileSize > UInt64(maxBytes) {
-            try handle.seek(toOffset: fileSize - UInt64(maxBytes))
-            suffixText = String(data: handle.readData(ofLength: maxBytes), encoding: .utf8) ?? ""
-        } else {
-            suffixText = prefixText
-        }
-
-        var suffixLines = suffixText.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
-        if fileSize > UInt64(maxBytes), !suffixText.hasPrefix("\n"), !suffixLines.isEmpty {
-            suffixLines.removeFirst()
-        }
-
-        return (
-            prefixLines: prefixText.split(separator: "\n", omittingEmptySubsequences: true).map(String.init),
-            suffixLines: suffixLines
-        )
-    }
-
     private func firstCapture(in text: String, pattern: String) -> String? {
         guard let regex = try? NSRegularExpression(pattern: pattern),
               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
@@ -357,31 +662,63 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         return String(text[range])
     }
 
-    private func extractMessage(from obj: [String: Any], fallbackID: String) -> PreviewMessage? {
-        let id = messageID(from: obj) ?? fallbackID
+    private func extractMessage(
+        from obj: [String: Any],
+        lineNumber: Int,
+        branchLineNumber: Int?,
+        isTurnStart: Bool,
+        isSteered: Bool,
+        isFirstVisibleUserMessage: Bool
+    ) -> PreviewMessage? {
         let timestamp = obj["timestamp"] as? String
         guard let payload = obj["payload"] as? [String: Any] else { return nil }
 
         if let type = payload["type"] as? String, type == "message" {
             let role = payload["role"] as? String ?? "message"
-            let text = extractContentText(payload["content"])
-            if !text.isEmpty { return PreviewMessage(id: id, role: role, text: text.prefixString(1200), timestamp: timestamp) }
+            if role.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "developer" {
+                return nil
+            }
+            let text = cleanPreviewText(extractContentText(payload["content"]))
+            if !text.isEmpty {
+                return PreviewMessage(
+                    role: role,
+                    text: text,
+                    timestamp: timestamp,
+                    lineNumber: lineNumber,
+                    branchLineNumber: branchLineNumber,
+                    isTurnStart: isTurnStart,
+                    isSteered: isSteered,
+                    isFirstVisibleUserMessage: role.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "user" && isFirstVisibleUserMessage
+                )
+            }
         }
 
         if let type = obj["type"] as? String, type == "user_message",
            let text = payload["message"] as? String {
-            return PreviewMessage(id: id, role: "user", text: text.prefixString(1200), timestamp: timestamp)
+            let cleanedText = cleanPreviewText(text)
+            if !cleanedText.isEmpty {
+                return PreviewMessage(
+                    role: "user",
+                    text: cleanedText,
+                    timestamp: timestamp,
+                    lineNumber: lineNumber,
+                    branchLineNumber: branchLineNumber,
+                    isTurnStart: isTurnStart,
+                    isSteered: isSteered,
+                    isFirstVisibleUserMessage: isFirstVisibleUserMessage
+                )
+            }
         }
 
         return nil
     }
 
-    private func messageID(from obj: [String: Any]) -> String? {
-        if let id = obj["id"] as? String { return id }
-        guard let payload = obj["payload"] as? [String: Any] else { return nil }
-        if let id = payload["id"] as? String { return id }
-        if let id = payload["message_id"] as? String { return id }
-        return nil
+    private func isUserObject(_ obj: [String: Any]) -> Bool {
+        let payload = obj["payload"] as? [String: Any]
+        if obj["type"] as? String == "user_message" {
+            return true
+        }
+        return (payload?["type"] as? String) == "message" && (payload?["role"] as? String) == "user"
     }
 
     private func extractContentText(_ value: Any?) -> String {
@@ -392,6 +729,22 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
             if let text = item["content"] as? String { return text }
             return nil
         }.joined(separator: "\n")
+    }
+
+    private func cleanPreviewText(_ text: String) -> String {
+        var result = text
+        result = removing(pattern: #"<permissions instructions>.*?</permissions instructions>\s*"#, from: result)
+        result = removing(pattern: #"# AGENTS\.md instructions[^\n]*(?:\n|\r\n).*?</INSTRUCTIONS>\s*"#, from: result)
+        result = removing(pattern: #"\n{3,}"#, from: result, replacingWith: "\n\n")
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func removing(pattern: String, from text: String, replacingWith replacement: String = "") -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else {
+            return text
+        }
+        let range = NSRange(text.startIndex..., in: text)
+        return regex.stringByReplacingMatches(in: text, range: range, withTemplate: replacement)
     }
 
     private func backupStateFiles(stamp: String) throws -> [String] {
@@ -407,7 +760,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
     }
 
     private func backup(_ url: URL, suffix: String) throws -> URL {
-        let destination = url.deletingLastPathComponent().appendingPathComponent(url.lastPathComponent + backupMarker + suffix)
+        let destination = url.deletingLastPathComponent().appendingPathComponent(url.lastPathComponent + ".codex-rescue-backup-" + suffix)
         if fileManager.fileExists(atPath: destination.path) {
             try fileManager.removeItem(at: destination)
         }
@@ -458,6 +811,69 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         try (lines.joined(separator: "\n") + "\n").write(to: sessionIndex, atomically: true, encoding: .utf8)
     }
 
+    private func upsertSessionIndex(threadID: String, title: String, updatedAt: String) throws {
+        guard fileManager.fileExists(atPath: sessionIndex.path) else { return }
+        let text = try String(contentsOf: sessionIndex, encoding: .utf8)
+        var lines: [String] = []
+        var didUpdate = false
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.isEmpty { continue }
+            guard let data = String(line).data(using: .utf8),
+                  var obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else {
+                lines.append(String(line))
+                continue
+            }
+            if obj["id"] as? String == threadID {
+                obj["updated_at"] = updatedAt
+                if (obj["thread_name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                    obj["thread_name"] = title
+                }
+                let encoded = try JSONSerialization.data(withJSONObject: obj, options: [])
+                lines.append(String(data: encoded, encoding: .utf8) ?? String(line))
+                didUpdate = true
+            } else {
+                lines.append(String(line))
+            }
+        }
+
+        if !didUpdate {
+            let obj: [String: String] = [
+                "id": threadID,
+                "thread_name": title,
+                "updated_at": updatedAt
+            ]
+            let encoded = try JSONSerialization.data(withJSONObject: obj, options: [])
+            guard let line = String(data: encoded, encoding: .utf8) else {
+                throw WakeError.invalidJSON("Cannot encode session index line")
+            }
+            lines.append(line)
+        }
+
+        try (lines.joined(separator: "\n") + "\n").write(to: sessionIndex, atomically: true, encoding: .utf8)
+    }
+
+    private func appendSessionIndex(threadID: String, title: String, updatedAt: String) throws {
+        guard fileManager.fileExists(atPath: sessionIndex.path) else { return }
+        let obj: [String: String] = [
+            "id": threadID,
+            "thread_name": title,
+            "updated_at": updatedAt
+        ]
+        let encoded = try JSONSerialization.data(withJSONObject: obj, options: [])
+        guard let line = String(data: encoded, encoding: .utf8) else {
+            throw WakeError.invalidJSON("Cannot encode session index line")
+        }
+        let existing = try String(contentsOf: sessionIndex, encoding: .utf8)
+        let separator = existing.hasSuffix("\n") || existing.isEmpty ? "" : "\n"
+        let handle = try FileHandle(forWritingTo: sessionIndex)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        if let data = (separator + line + "\n").data(using: .utf8) {
+            try handle.write(contentsOf: data)
+        }
+    }
+
     private func updateSessionMeta(path: URL, timestamp: String) throws {
         let text = try String(contentsOf: path, encoding: .utf8)
         let parts = text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
@@ -477,6 +893,30 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         try (firstLine + "\n" + rest).write(to: path, atomically: true, encoding: .utf8)
     }
 
+    private func branchContent(from lines: [String], newThreadID: String, timestamp: String, cwd: String) throws -> String {
+        guard let first = lines.first,
+              let data = first.data(using: .utf8),
+              var obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { throw WakeError.invalidJSON("Cannot decode first JSONL line") }
+
+        obj["timestamp"] = timestamp
+        var payload = obj["payload"] as? [String: Any] ?? [:]
+        payload["id"] = newThreadID
+        payload["timestamp"] = timestamp
+        payload["cwd"] = cwd
+        payload["thread_source"] = "user"
+        obj["payload"] = payload
+
+        let encoded = try JSONSerialization.data(withJSONObject: obj, options: [])
+        guard let firstLine = String(data: encoded, encoding: .utf8) else {
+            throw WakeError.invalidJSON("Cannot encode branched session meta")
+        }
+
+        var result = [firstLine]
+        result.append(contentsOf: lines.dropFirst())
+        return result.joined(separator: "\n") + "\n"
+    }
+
     private func updateSessionMetaProject(path: URL, cwd: String) throws {
         let text = try String(contentsOf: path, encoding: .utf8)
         let parts = text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
@@ -493,6 +933,133 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         let firstLine = String(data: encoded, encoding: .utf8) ?? String(first)
         let rest = parts.count > 1 ? String(parts[1]) : ""
         try (firstLine + "\n" + rest).write(to: path, atomically: true, encoding: .utf8)
+    }
+
+    private func insertBranchedSQLiteRow(
+        sourceThreadID: String,
+        newThreadID: String,
+        rolloutPath: String,
+        title: String,
+        createdAt: Int64,
+        updatedAt: Int64,
+        createdAtMs: Int64,
+        updatedAtMs: Int64
+    ) throws {
+        let sourceID = sql(sourceThreadID)
+        let statementSQL = """
+        insert into threads (
+            id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+            sandbox_policy, approval_mode, tokens_used, has_user_event, archived, archived_at,
+            git_sha, git_branch, git_origin_url, cli_version, first_user_message,
+            agent_nickname, agent_role, memory_mode, model, reasoning_effort, agent_path,
+            created_at_ms, updated_at_ms, thread_source, preview
+        )
+        select
+            '\(sql(newThreadID))',
+            '\(sql(rolloutPath))',
+            \(createdAt),
+            \(updatedAt),
+            source,
+            model_provider,
+            cwd,
+            '\(sql(title))',
+            sandbox_policy,
+            approval_mode,
+            0,
+            has_user_event,
+            0,
+            NULL,
+            git_sha,
+            git_branch,
+            git_origin_url,
+            cli_version,
+            first_user_message,
+            agent_nickname,
+            agent_role,
+            memory_mode,
+            model,
+            reasoning_effort,
+            agent_path,
+            \(createdAtMs),
+            \(updatedAtMs),
+            'user',
+            preview
+        from threads
+        where id = '\(sourceID)';
+        """
+        _ = try Shell.run("/usr/bin/sqlite3", [stateDB.path, statementSQL])
+    }
+
+    private func verifyBranchedSQLiteRow(threadID: String) throws {
+        let output = try Shell.run(
+            "/usr/bin/sqlite3",
+            [stateDB.path, "select count(*) from threads where id = '\(sql(threadID))';"]
+        )
+        guard output.trimmingCharacters(in: .whitespacesAndNewlines) == "1" else {
+            throw WakeError.commandFailed("Branch was not registered in the Codex state database.")
+        }
+    }
+
+    private func deleteBranchedSQLiteRow(threadID: String) throws {
+        _ = try Shell.run(
+            "/usr/bin/sqlite3",
+            [stateDB.path, "delete from threads where id = '\(sql(threadID))';"]
+        )
+    }
+
+    private func branchTitle(for thread: CodexThread) -> String {
+        "Branch: \(thread.shortTitle)".prefixString(240)
+    }
+
+    private func branchDatePath(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy/MM/dd"
+        return formatter.string(from: date)
+    }
+
+    private func branchFileTimestamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd'T'HH-mm-ss"
+        return formatter.string(from: date)
+    }
+
+    private func uniqueThreadID() throws -> String {
+        var id = makeUUIDv7()
+        var attempts = 0
+        while fileManager.fileExists(atPath: codexHome.appendingPathComponent("sessions").appendingPathComponent(id).path) {
+            id = makeUUIDv7()
+            attempts += 1
+            if attempts > 10 {
+                throw WakeError.commandFailed("Could not generate a unique thread id.")
+            }
+        }
+        return id
+    }
+
+    private func makeUUIDv7() -> String {
+        let timestampMs = UInt64(Date().timeIntervalSince1970 * 1000)
+        var bytes = (0..<16).map { _ in UInt8.random(in: 0...255) }
+        bytes[0] = UInt8((timestampMs >> 40) & 0xff)
+        bytes[1] = UInt8((timestampMs >> 32) & 0xff)
+        bytes[2] = UInt8((timestampMs >> 24) & 0xff)
+        bytes[3] = UInt8((timestampMs >> 16) & 0xff)
+        bytes[4] = UInt8((timestampMs >> 8) & 0xff)
+        bytes[5] = UInt8(timestampMs & 0xff)
+        bytes[6] = (bytes[6] & 0x0f) | 0x70
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+
+        let hex = bytes.map { String(format: "%02x", $0) }.joined()
+        return [
+            String(hex.prefix(8)),
+            String(hex.dropFirst(8).prefix(4)),
+            String(hex.dropFirst(12).prefix(4)),
+            String(hex.dropFirst(16).prefix(4)),
+            String(hex.dropFirst(20).prefix(12))
+        ].joined(separator: "-")
+    }
+
+    private func sql(_ value: String) -> String {
+        value.replacingOccurrences(of: "'", with: "''")
     }
 
     private func backupStamp() -> String {

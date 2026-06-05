@@ -41,8 +41,24 @@ enum WakeDates {
         return displayFormatter.string(from: date)
     }
 
-    static func compactDisplay(_ date: Date) -> String {
-        compactDisplayFormatter.string(from: date)
+    static func shortDate(_ date: Date?) -> String {
+        guard let date else { return "-" }
+        return shortDateFormatter.string(from: date)
+    }
+
+    static func compactDisplay(_ date: Date?) -> String {
+        guard let date else { return "-" }
+        return compactFormatter.string(from: date)
+    }
+
+    static func displayBackupStamp(_ stamp: String) -> String {
+        guard let date = dateFromBackupStamp(stamp) else { return stamp }
+        return displayFormatter.string(from: date)
+    }
+
+    static func dateFromBackupStamp(_ stamp: String) -> Date? {
+        let datePart = String(stamp.prefix(15))
+        return backupStampFormatter.date(from: datePart)
     }
 
     private static let isoBase: ISO8601DateFormatter = {
@@ -73,9 +89,24 @@ enum WakeDates {
         return formatter
     }()
 
-    private static let compactDisplayFormatter: DateFormatter = {
+    private static let shortDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.dateFormat = "MMM d HH:mm"
+        formatter.dateStyle = .short
+        formatter.timeStyle = .none
+        return formatter
+    }()
+
+    private static let compactFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    private static let backupStampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
         return formatter
     }()
 }
