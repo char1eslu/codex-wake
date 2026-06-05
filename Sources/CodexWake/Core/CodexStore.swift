@@ -52,7 +52,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
 
     func loadBackups() throws -> [BackupFile] {
         guard fileManager.fileExists(atPath: codexHome.path) else { throw WakeError.missingCodexHome(codexHome) }
-        return try scanBackups(in: codexHome, includeTrash: false).filter(isMainBackup)
+        return try scanBackups(in: codexHome, includeTrash: false)
     }
 
     func loadBackupTrash() throws -> [BackupFile] {
@@ -548,14 +548,6 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
             return "Created before a chat change (legacy backup)"
         }
         return "Created by Codex Wake"
-    }
-
-    private func isMainBackup(_ backup: BackupFile) -> Bool {
-        guard backup.kind == .chatFile else { return false }
-        if backup.stamp.contains("-wake") || backup.stamp.contains("-move") {
-            return false
-        }
-        return true
     }
 
     private func backupChatTitle(from url: URL, sessionIndex: [String: SessionIndexEntry]) -> String? {
