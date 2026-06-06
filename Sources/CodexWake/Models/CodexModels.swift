@@ -313,9 +313,8 @@ enum BackupKind: String, Hashable {
 
 extension String {
     var oneLine: String {
-        replacingOccurrences(of: "\n", with: " ")
-            .replacingOccurrences(of: "\r", with: " ")
-            .replacingOccurrences(of: "  ", with: " ")
+        split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
     }
 
     func prefixString(_ count: Int) -> String {

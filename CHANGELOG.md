@@ -2,6 +2,11 @@
 
 All notable changes to Codex Wake are documented here.
 
+## 0.1.5 - 2026-06-06
+
+- Fixed a SwiftUI list layout busy loop triggered by long, multi-line chat metadata.
+- Normalized loaded chat metadata to bounded one-line strings before rendering.
+
 ## 0.1.4 - 2026-06-05
 
 - Added **Trim from here** for cutting a local chat back to an earlier user message, with a backup created first.

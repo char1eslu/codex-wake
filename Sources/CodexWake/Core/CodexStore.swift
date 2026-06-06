@@ -35,10 +35,10 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
                 threadSource: row.thread_source ?? "",
                 hasUserEvent: (row.has_user_event ?? 0) != 0,
                 archived: (row.archived ?? 0) != 0,
-                title: row.title,
-                sessionIndexTitle: indexEntry?.thread_name ?? "",
-                firstUserMessage: row.first_user_message ?? "",
-                preview: row.preview ?? "",
+                title: metadataText(row.title, maxLength: 240),
+                sessionIndexTitle: metadataText(indexEntry?.thread_name, maxLength: 240),
+                firstUserMessage: metadataText(row.first_user_message, maxLength: 500),
+                preview: metadataText(row.preview, maxLength: 500),
                 cwd: row.cwd,
                 isInSessionIndex: indexEntry != nil,
                 sessionIndexUpdatedAt: WakeDates.parseISO(indexEntry?.updated_at),
@@ -599,6 +599,13 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
     private func nullableText(_ statement: OpaquePointer, _ index: Int32) -> String? {
         guard sqlite3_column_type(statement, index) != SQLITE_NULL else { return nil }
         return text(statement, index)
+    }
+
+    private func metadataText(_ text: String?, maxLength: Int) -> String {
+        (text ?? "")
+            .oneLine
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .prefixString(maxLength)
     }
 
     private func int(_ statement: OpaquePointer, _ index: Int32) -> Int? {

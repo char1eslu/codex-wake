@@ -5,7 +5,6 @@ struct ThreadListView: View {
     @Binding var activePane: WakeFocusPane
     @State private var isMoveSheetPresented = false
     @State private var rangeAnchorID: String?
-    @State private var visibleThreadIDs: Set<String> = []
     @State private var pendingThreadScrollAnchor: UnitPoint?
     @FocusState private var isSearchFocused: Bool
 
@@ -74,18 +73,12 @@ struct ThreadListView: View {
 
             Divider()
 
-            GeometryReader { scrollGeometry in
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        threadResults
-                    }
-                    .coordinateSpace(name: ThreadListCoordinateSpace.name)
-                    .onPreferenceChange(ThreadRowFramePreferenceKey.self) { frames in
-                        updateVisibleThreads(from: frames, viewportHeight: scrollGeometry.size.height)
-                    }
-                    .onChange(of: model.selectedThreadID) { _, selectedThreadID in
-                        scrollToSelectedThread(selectedThreadID, proxy: proxy)
-                    }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    threadResults
+                }
+                .onChange(of: model.selectedThreadID) { _, selectedThreadID in
+                    scrollToSelectedThread(selectedThreadID, proxy: proxy)
                 }
             }
         }
@@ -121,14 +114,6 @@ struct ThreadListView: View {
                         query: model.searchText
                     )
                     .id(thread.id)
-                    .background {
-                        GeometryReader { geometry in
-                            Color.clear.preference(
-                                key: ThreadRowFramePreferenceKey.self,
-                                value: [thread.id: geometry.frame(in: .named(ThreadListCoordinateSpace.name))]
-                            )
-                        }
-                    }
                     .contentShape(RoundedRectangle(cornerRadius: 8))
                     .onTapGesture {
                         select(thread)
@@ -290,38 +275,11 @@ struct ThreadListView: View {
 
     private func scrollToSelectedThread(_ threadID: String?, proxy: ScrollViewProxy) {
         guard let threadID else { return }
-        guard !visibleThreadIDs.contains(threadID) else {
-            pendingThreadScrollAnchor = nil
-            return
-        }
-        let anchor = pendingThreadScrollAnchor ?? .center
+        guard let anchor = pendingThreadScrollAnchor else { return }
         pendingThreadScrollAnchor = nil
         DispatchQueue.main.async {
             proxy.scrollTo(threadID, anchor: anchor)
         }
-    }
-
-    private func updateVisibleThreads(from frames: [String: CGRect], viewportHeight: CGFloat) {
-        let nextVisibleIDs = Set(
-            frames.compactMap { threadID, frame in
-                frame.maxY > 0 && frame.minY < viewportHeight ? threadID : nil
-            }
-        )
-        if nextVisibleIDs != visibleThreadIDs {
-            visibleThreadIDs = nextVisibleIDs
-        }
-    }
-}
-
-private enum ThreadListCoordinateSpace {
-    static let name = "thread-list-scroll"
-}
-
-private struct ThreadRowFramePreferenceKey: PreferenceKey {
-    static var defaultValue: [String: CGRect] = [:]
-
-    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
-        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
     }
 }
 
