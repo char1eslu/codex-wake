@@ -42,12 +42,15 @@ struct CopyFeedbackButton: View {
                 Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
                 if let label {
                     Text(didCopy ? copiedLabel : label)
+                        .lineLimit(1)
                 } else if showsCopiedLabel && didCopy {
                     Text(copiedLabel)
                         .font(.caption2.weight(.medium))
+                        .lineLimit(1)
                 }
             }
             .contentTransition(.symbolEffect(.replace))
+            .fixedSize(horizontal: true, vertical: false)
             .frame(minWidth: label == nil && !(showsCopiedLabel && didCopy) ? 18 : nil)
         }
     }

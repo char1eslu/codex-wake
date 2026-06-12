@@ -8,7 +8,7 @@ struct ProjectSidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Text("Codex Wake")
+                Text("Codex Keeper")
                     .font(.headline)
                 Spacer()
                 Button {
@@ -91,10 +91,10 @@ private struct ProjectRow: View {
                     .font(.caption)
             }
             HStack(spacing: 8) {
-                Label("\(project.shownCount)", systemImage: "checkmark.circle.fill")
+                Label("\(project.availableCount)", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(isSelected ? .white.opacity(0.9) : .green)
-                if project.hiddenCount > 0 {
-                    Label("\(project.hiddenCount)", systemImage: "clock.badge.exclamationmark")
+                if project.repairCount > 0 {
+                    Label("\(project.repairCount)", systemImage: "wrench.and.screwdriver")
                         .foregroundStyle(isSelected ? .white.opacity(0.9) : .orange)
                 }
             }

@@ -28,7 +28,7 @@ struct ThreadDetailView: View {
                                 .frame(height: 1)
                                 .id(DetailScrollTarget.bottom(for: thread.id))
                         }
-                        .padding(.horizontal, 22)
+                        .padding(.horizontal, 20)
                         .padding(.bottom, 22)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background {
@@ -103,47 +103,79 @@ struct ThreadDetailView: View {
     }
 
     private func actions(_ thread: CodexThread) -> some View {
-        HStack(spacing: 10) {
-            Button {
-                model.selectThread(thread)
-                Task { await model.wakeSelectedThread() }
-            } label: {
-                Label("Wake", systemImage: "alarm")
-            }
-            .liquidGlassProminentButtonStyle()
-            .disabled(model.isLoading || thread.archived || !thread.fileExists)
-            .help(model.isDemoMode ? "Show a demo wake report without changing local files" : "Back up metadata, update dates, and make the chat recent in Codex App")
-
-            Button {
-                model.selectThread(thread)
-                isMoveSheetPresented = true
-            } label: {
-                Label("Move", systemImage: "folder.badge.plus")
-            }
-            .liquidGlassButtonStyle()
-            .disabled(model.isLoading || model.moveTargetProjects.isEmpty || thread.archived || !thread.fileExists)
-            .help("Move this chat to another known project")
-
-            Button {
-                model.selectThread(thread)
-                model.revealSelectedInFinder()
-            } label: {
-                Label("Reveal", systemImage: "folder")
-            }
-            .liquidGlassButtonStyle()
-            .disabled(model.isDemoMode)
-
-            CopyFeedbackButton(
-                text: thread.rolloutPath,
-                help: "Copy chat path",
-                label: "Copy Path",
-                usesPlainButtonStyle: false,
-                normalForeground: .primary
-            )
-            .liquidGlassButtonStyle()
-            .disabled(model.isDemoMode)
+        HStack(spacing: 8) {
+            repairButton(thread)
+            moveButton(thread)
+            revealButton(thread)
+            trashButton(thread)
+            copyPathButton(thread)
         }
-        .liquidGlassContainer(spacing: 10)
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .liquidGlassContainer(spacing: 8)
+    }
+
+    private func repairButton(_ thread: CodexThread) -> some View {
+        Button {
+            model.selectThread(thread)
+            Task { await model.wakeSelectedThread() }
+        } label: {
+            actionLabel("Repair Index", systemImage: "wrench.and.screwdriver")
+        }
+        .liquidGlassProminentButtonStyle()
+        .disabled(model.isLoading || !thread.needsRepair)
+        .help(model.isDemoMode ? "Show a demo repair report without changing local files" : "Back up metadata and add the missing session_index.jsonl entry")
+    }
+
+    private func moveButton(_ thread: CodexThread) -> some View {
+        Button {
+            model.selectThread(thread)
+            isMoveSheetPresented = true
+        } label: {
+            actionLabel("Move", systemImage: "folder.badge.plus")
+        }
+        .liquidGlassButtonStyle()
+        .disabled(model.isLoading || model.moveTargetProjects.isEmpty || thread.archived || !thread.fileExists)
+        .help("Move this chat to another known project")
+    }
+
+    private func revealButton(_ thread: CodexThread) -> some View {
+        Button {
+            model.selectThread(thread)
+            model.revealSelectedInFinder()
+        } label: {
+            actionLabel("Reveal", systemImage: "folder")
+        }
+        .liquidGlassButtonStyle()
+        .disabled(model.isDemoMode)
+    }
+
+    private func trashButton(_ thread: CodexThread) -> some View {
+        Button(role: .destructive) {
+            model.selectThread(thread)
+            Task { await model.moveSelectedThreadsToTrash() }
+        } label: {
+            actionLabel("Trash", systemImage: "trash")
+        }
+        .liquidGlassButtonStyle()
+        .disabled(model.isLoading)
+    }
+
+    private func copyPathButton(_ thread: CodexThread) -> some View {
+        CopyFeedbackButton(
+            text: thread.rolloutPath,
+            help: "Copy chat path",
+            label: "Copy Path",
+            usesPlainButtonStyle: false,
+            normalForeground: .primary
+        )
+        .liquidGlassButtonStyle()
+        .disabled(model.isDemoMode)
+    }
+
+    private func actionLabel(_ title: String, systemImage: String) -> some View {
+        Label(title, systemImage: systemImage)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
     }
 
     @ViewBuilder

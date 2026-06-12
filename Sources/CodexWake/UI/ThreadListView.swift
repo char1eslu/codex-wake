@@ -144,10 +144,10 @@ struct ThreadListView: View {
             Button {
                 Task { await model.wakeSelectedThreads() }
             } label: {
-                Label("Wake", systemImage: "alarm")
+                Label("Repair", systemImage: "wrench.and.screwdriver")
             }
             .liquidGlassButtonStyle()
-            .disabled(model.isLoading || !model.canOperateOnSelectedThreads)
+            .disabled(model.isLoading || !model.canRepairSelectedThreads)
 
             Button {
                 isMoveSheetPresented = true
@@ -156,6 +156,15 @@ struct ThreadListView: View {
             }
             .liquidGlassButtonStyle()
             .disabled(model.isLoading || model.moveTargetProjects.isEmpty)
+
+            Button(role: .destructive) {
+                Task { await model.moveSelectedThreadsToTrash() }
+            } label: {
+                Image(systemName: "trash")
+            }
+            .liquidGlassButtonStyle()
+            .disabled(model.isLoading || !model.canTrashSelectedThreads)
+            .help("Move selected chats to Codex Keeper Trash")
 
             Button {
                 model.revealSelectedInFinder()
@@ -295,7 +304,7 @@ private struct ThreadContextMenu: View {
             model.focusContextSelection(on: thread)
             Task { await model.wakeThreads(ids: targetIDs) }
         } label: {
-            Label(targetIDs.count > 1 ? "Wake Selected Chats" : "Wake Chat", systemImage: "alarm")
+            Label(targetIDs.count > 1 ? "Repair Selected Indexes" : "Repair Index", systemImage: "wrench.and.screwdriver")
         }
         .disabled(model.isLoading)
 
@@ -304,6 +313,14 @@ private struct ThreadContextMenu: View {
             isMoveSheetPresented = true
         } label: {
             Label(targetIDs.count > 1 ? "Move Selected Chats..." : "Move Chat...", systemImage: "folder.badge.plus")
+        }
+        .disabled(model.isLoading || targetIDs.isEmpty)
+
+        Button(role: .destructive) {
+            model.focusContextSelection(on: thread)
+            Task { await model.moveThreadsToTrash(ids: targetIDs) }
+        } label: {
+            Label(targetIDs.count > 1 ? "Move Selected Chats to Trash" : "Move Chat to Trash", systemImage: "trash")
         }
         .disabled(model.isLoading || targetIDs.isEmpty)
 
@@ -502,7 +519,7 @@ private struct StatusPill: View {
 
     private var color: Color {
         if thread.archived || !thread.fileExists { return .red }
-        if thread.needsWake { return .orange }
+        if thread.needsRepair { return .orange }
         return .green
     }
 

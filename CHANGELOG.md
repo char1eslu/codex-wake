@@ -1,6 +1,25 @@
 # Changelog
 
-All notable changes to Codex Wake are documented here.
+All notable changes to Codex Keeper, formerly Codex Wake, are documented here.
+
+## 0.2.0 - 2026-06-12
+
+- Renamed the app from **Codex Wake** to **Codex Keeper**.
+- Added the new Codex Keeper app icon.
+- Updated the app bundle name, sidebar title, window title, README, release copy, and user-facing maintenance messages.
+- Kept the repository name `codex-wake`, bundle identifier `app.codexwake.CodexWake`, executable name `CodexWake`, and legacy `.codex-wake-trash` storage path for compatibility.
+- Positioned the app as a local Codex chat maintenance tool while preserving existing backup, trash, repair, trim, branch, and restore workflows.
+- Set the default main-window size to `1200x890` and keep detail action buttons visible on one line.
+- Refreshed the README screenshot for the new Codex Keeper layout.
+
+## 0.1.6 - 2026-06-12
+
+- Updated chat availability behavior for Codex app 26.609, which now shows older chats directly in the sidebar.
+- Replaced the primary wake workflow with **Repair Index** for chats missing from `session_index.jsonl`.
+- Added safe **Move to Trash** support for chats, including selected chats.
+- Added trashed chat restore and permanent delete actions in the Backup Manager **Trash** tab.
+- Missing chat files can now be cleaned from Codex metadata by moving them to Codex Keeper Trash.
+- Added optional `CODEX_WAKE_SCRATCH_PATH` support to the app build script for clean Swift builds.
 
 ## 0.1.5 - 2026-06-06
 

@@ -3,7 +3,7 @@ set -euo pipefail
 
 MODE="${1:-run}"
 APP_NAME="CodexWake"
-APP_DISPLAY_NAME="Codex Wake"
+APP_DISPLAY_NAME="Codex Keeper"
 BUNDLE_ID="app.codexwake.CodexWake"
 MIN_SYSTEM_VERSION="14.0"
 

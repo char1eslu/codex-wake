@@ -5,8 +5,16 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
     private let lock = NSLock()
     private var movedProjects: [String: String] = [:]
     private var trashedBackupIDs = Set<String>()
+    private var trashedThreadIDs = Set<String>()
 
     func loadThreads() throws -> [CodexThread] {
+        let trashedThreads = trashedThreadSnapshot()
+        return loadAllDemoThreads()
+            .filter { !trashedThreads.contains($0.id) }
+            .sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    private func loadAllDemoThreads() -> [CodexThread] {
         let projects = [
             ("/Users/demo/projects/sample-app", "sample-app"),
             ("/Users/demo/projects/design-system", "design-system"),
@@ -19,7 +27,7 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
             ("Design release screenshot", "Prepare a clean public screenshot with sample data and no private chat content.", projects[0].0, 16, false),
             ("Add demo mode for screenshots", "Create a launch mode that renders realistic sample projects without reading ~/.codex.", projects[0].0, 26, false),
             ("Review onboarding empty state", "Tighten the first-run layout so new users understand what the app can read locally.", projects[1].0, 9 * 24, true),
-            ("Compare search result states", "Check hidden, shown, archived, and missing-file rows before publishing the release notes.", projects[1].0, 11 * 24, true),
+            ("Compare search result states", "Check available, repair-needed, archived, and missing-file rows before publishing the release notes.", projects[1].0, 11 * 24, true),
             ("Plan documentation flow", "Sketch the README structure, install steps, privacy notes, and release download path.", projects[2].0, 42, false),
             ("Clean up transcript preview", "Tune message parsing, timestamps, and long-text wrapping for readable chat previews.", projects[2].0, 13 * 24, true),
             ("Prepare signed release", "Build, sign, notarize, and package the macOS app for the first public release.", projects[3].0, 3 * 24, false),
@@ -55,7 +63,6 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
                 fileExists: true
             )
         }
-        .sorted { $0.updatedAt > $1.updatedAt }
     }
 
     func loadBackups() throws -> [BackupFile] {
@@ -66,6 +73,25 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
     func loadBackupTrash() throws -> [BackupFile] {
         demoBackupSamples()
             .filter { trashedBackupSnapshot().contains($0.id) }
+    }
+
+    func loadThreadTrash() throws -> [TrashedThread] {
+        let trashedThreads = trashedThreadSnapshot()
+        return loadAllDemoThreads()
+            .filter { trashedThreads.contains($0.id) }
+            .map { thread in
+                TrashedThread(
+                    threadID: thread.id,
+                    title: thread.shortTitle,
+                    originalPath: thread.rolloutPath,
+                    trashPath: "/demo/codex-wake/.codex-wake-trash/threads/\(thread.id)/\(URL(fileURLWithPath: thread.rolloutPath).lastPathComponent)",
+                    manifestPath: "/demo/codex-wake/.codex-wake-trash/threads/\(thread.id)/manifest.json",
+                    cwd: thread.cwd,
+                    trashedAt: baseDate.addingTimeInterval(-30 * 60),
+                    size: 420_000,
+                    originalExists: false
+                )
+            }
     }
 
     private func demoBackupSamples() -> [BackupFile] {
@@ -94,7 +120,7 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
                 kind: kind,
                 originalExists: true,
                 chatTitle: kind == .chatFile ? "Fix disappearing sidebar threads" : nil,
-                reason: kind == .chatFile ? "Created before Trim from here" : "Created by Codex Wake"
+                reason: kind == .chatFile ? "Created before Trim from here" : "Created by Codex Keeper"
             )
         }
     }
@@ -202,6 +228,34 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
         )
     }
 
+    func moveThreadToTrash(_ thread: CodexThread) throws -> TrashThreadReport {
+        lock.lock()
+        trashedThreadIDs.insert(thread.id)
+        lock.unlock()
+
+        return TrashThreadReport(
+            threadID: thread.id,
+            title: thread.shortTitle,
+            rolloutPath: thread.rolloutPath,
+            trashedPath: "/demo/codex-wake/.codex-wake-trash/threads/\(thread.id)/\(URL(fileURLWithPath: thread.rolloutPath).lastPathComponent)",
+            timestamp: "demo",
+            backups: ["Demo mode does not read or write local Codex files."],
+            changedFiles: []
+        )
+    }
+
+    func restoreTrashedThread(_ thread: TrashedThread) throws {
+        lock.lock()
+        trashedThreadIDs.remove(thread.id)
+        lock.unlock()
+    }
+
+    func deleteTrashedThreadPermanently(_ thread: TrashedThread) throws {
+        lock.lock()
+        trashedThreadIDs.remove(thread.id)
+        lock.unlock()
+    }
+
     func restoreBackup(_ backup: BackupFile) throws {
         guard backup.kind == .chatFile else {
             throw WakeError.commandFailed("Only chat file backups can be restored.")
@@ -222,6 +276,14 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
         return count
     }
 
+    func emptyThreadTrash() throws -> Int {
+        lock.lock()
+        let count = trashedThreadIDs.count
+        trashedThreadIDs.removeAll()
+        lock.unlock()
+        return count
+    }
+
     private func samplePreview(title: String) -> String {
         "Preview for \(title): synthetic chat content for public screenshots, documentation, and safe UI testing."
     }
@@ -236,6 +298,12 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return trashedBackupIDs
+    }
+
+    private func trashedThreadSnapshot() -> Set<String> {
+        lock.lock()
+        defer { lock.unlock() }
+        return trashedThreadIDs
     }
 
     private func demoBackupStamp(_ date: Date) -> String {

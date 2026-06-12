@@ -15,9 +15,10 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 230, ideal: 270, max: 340)
         } content: {
             ThreadListView(activePane: $activePane)
-                .navigationSplitViewColumnWidth(min: 320, ideal: 390, max: 520)
+                .navigationSplitViewColumnWidth(min: 300, ideal: 350, max: 430)
         } detail: {
             ThreadDetailView(activePane: $activePane)
+                .navigationSplitViewColumnWidth(min: 540, ideal: 620, max: 760)
         }
         .overlay(alignment: .bottom) {
             if model.isLoading {
@@ -46,6 +47,10 @@ struct ContentView: View {
             }
         }
         .liquidGlassBackground
+        .background {
+            MainWindowSizeConfigurator()
+                .frame(width: 0, height: 0)
+        }
         .onAppear {
             installKeyMonitorIfNeeded()
             clearInitialTextFocusIfNeeded()

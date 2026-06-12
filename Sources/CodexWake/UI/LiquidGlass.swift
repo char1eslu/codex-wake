@@ -49,7 +49,6 @@ extension View {
     func liquidGlassProminentButtonStyle() -> some View {
         if #available(macOS 26.0, *) {
             self
-                .foregroundStyle(.white)
                 .tint(.accentColor)
                 .buttonStyle(.glassProminent)
         } else {

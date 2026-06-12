@@ -16,11 +16,14 @@ final class AppModel: ObservableObject {
     @Published var selectedThreadID: String?
     @Published var selectedThreadIDs: Set<String> = []
     @Published var selectedBackupIDs: Set<String> = []
+    @Published var selectedTrashThreadIDs: Set<String> = []
+    @Published var selectedTrashBackupIDs: Set<String> = []
     @Published private(set) var projects: [ProjectSummary] = [.all]
     @Published private(set) var threads: [CodexThread] = []
     @Published private(set) var filteredThreads: [CodexThread] = []
     @Published private(set) var backups: [BackupFile] = []
     @Published private(set) var backupTrash: [BackupFile] = []
+    @Published private(set) var threadTrash: [TrashedThread] = []
     @Published private(set) var isLoadingBackups = false
     @Published var preview: ThreadPreview?
     @Published private(set) var isPreviewLoading = false
@@ -50,6 +53,14 @@ final class AppModel: ObservableObject {
 
     var canOperateOnSelectedThreads: Bool {
         selectedThreads.contains { !$0.archived && $0.fileExists }
+    }
+
+    var canRepairSelectedThreads: Bool {
+        selectedThreads.contains(where: \.needsRepair)
+    }
+
+    var canTrashSelectedThreads: Bool {
+        !selectedThreads.isEmpty
     }
 
     var moveTargetProjects: [ProjectSummary] {
@@ -87,6 +98,28 @@ final class AppModel: ObservableObject {
     var selectedBackups: [BackupFile] {
         let ids = selectedBackupIDs
         return backups.filter { ids.contains($0.id) }
+    }
+
+    var selectedTrashThreads: [TrashedThread] {
+        let ids = selectedTrashThreadIDs
+        return threadTrash.filter { ids.contains($0.id) }
+    }
+
+    var selectedTrashBackups: [BackupFile] {
+        let ids = selectedTrashBackupIDs
+        return backupTrash.filter { ids.contains($0.id) }
+    }
+
+    var trashItemCount: Int {
+        threadTrash.count + backupTrash.count
+    }
+
+    var trashSize: Int64 {
+        threadTrash.reduce(0) { $0 + $1.size } + backupTrash.reduce(0) { $0 + $1.size }
+    }
+
+    var trashSizeLabel: String {
+        ByteCountFormatter.string(fromByteCount: trashSize, countStyle: .file)
     }
 
     init(demoMode: Bool = AppModel.detectDemoMode(), store: (any ThreadStore)? = nil) {
@@ -227,14 +260,15 @@ final class AppModel: ObservableObject {
     }
 
     func wakeThreads(ids: Set<String>) async {
-        let targets = orderedThreads(for: ids).filter { !$0.archived && $0.fileExists }
+        let selected = orderedThreads(for: ids)
+        let targets = selected.filter(\.needsRepair)
         guard !targets.isEmpty else {
-            status = "No selectable chats can be woken"
+            status = "No selected chats need index repair"
             return
         }
 
         isLoading = true
-        status = targets.count == 1 ? "Waking chat..." : "Waking \(targets.count) chats..."
+        status = targets.count == 1 ? "Repairing index..." : "Repairing index for \(targets.count) chats..."
         errorMessage = nil
         operationReport = nil
         defer { isLoading = false }
@@ -267,15 +301,15 @@ final class AppModel: ObservableObject {
         }.value
 
         operationReport = OperationReport(
-            title: "Wake complete",
+            title: "Repair Index complete",
             threadIDs: result.targetIDs,
             timestamp: WakeDates.display(Date()),
-            summary: "\(result.successIDs.count) of \(targets.count) chats updated",
+            summary: "\(result.successIDs.count) of \(targets.count) missing index entries repaired",
             backups: result.backups,
             changedFiles: Array(Set(result.changedFiles)).sorted(),
             failures: result.failures
         )
-        status = result.failures.isEmpty ? "Wake complete" : "Wake completed with \(result.failures.count) failures"
+        status = result.failures.isEmpty ? "Repair Index complete" : "Repair Index completed with \(result.failures.count) failures"
 
         invalidatePreviewCache(for: result.successIDs)
         let idsToKeep = ids
@@ -346,6 +380,63 @@ final class AppModel: ObservableObject {
         setSelection(result.successIDs.isEmpty ? Set(targets.map(\.id)) : result.successIDs, shouldLoadPreview: true)
     }
 
+    func moveSelectedThreadsToTrash() async {
+        await moveThreadsToTrash(ids: selectedThreadIDs)
+    }
+
+    func moveThreadsToTrash(ids: Set<String>) async {
+        let targets = orderedThreads(for: ids)
+        guard !targets.isEmpty else { return }
+
+        isLoading = true
+        status = targets.count == 1 ? "Moving chat to Trash..." : "Moving \(targets.count) chats to Trash..."
+        errorMessage = nil
+        operationReport = nil
+        defer { isLoading = false }
+
+        let store = self.store
+        let result = await Task.detached(priority: .userInitiated) {
+            var backups: [String] = []
+            var changedFiles: [String] = []
+            var failures: [String] = []
+            var successIDs: Set<String> = []
+
+            for thread in targets {
+                do {
+                    let report = try store.moveThreadToTrash(thread)
+                    backups.append(contentsOf: report.backups)
+                    changedFiles.append(contentsOf: report.changedFiles)
+                    successIDs.insert(thread.id)
+                } catch {
+                    failures.append("\(thread.shortTitle): \(Self.readable(error))")
+                }
+            }
+
+            return BatchOperationResult(
+                targetIDs: Set(targets.map(\.id)),
+                successIDs: successIDs,
+                backups: backups,
+                changedFiles: changedFiles,
+                failures: failures
+            )
+        }.value
+
+        operationReport = OperationReport(
+            title: "Move to Trash complete",
+            threadIDs: result.targetIDs,
+            timestamp: WakeDates.display(Date()),
+            summary: "\(result.successIDs.count) of \(targets.count) chats moved to Codex Keeper Trash",
+            backups: result.backups,
+            changedFiles: Array(Set(result.changedFiles)).sorted(),
+            failures: result.failures
+        )
+        status = result.failures.isEmpty ? "Moved to Trash" : "Move to Trash completed with \(result.failures.count) failures"
+
+        invalidatePreviewCache(for: result.successIDs)
+        await refresh()
+        await refreshBackups()
+    }
+
     func revealSelectedInFinder() {
         revealThreadsInFinder(ids: selectedThreadIDs)
     }
@@ -388,12 +479,16 @@ final class AppModel: ObservableObject {
             let loaded = try await Task.detached(priority: .userInitiated) {
                 (
                     backups: try store.loadBackups(),
-                    backupTrash: try store.loadBackupTrash()
+                    backupTrash: try store.loadBackupTrash(),
+                    threadTrash: try store.loadThreadTrash()
                 )
             }.value
             backups = loaded.backups
             backupTrash = loaded.backupTrash
+            threadTrash = loaded.threadTrash
             selectedBackupIDs = selectedBackupIDs.intersection(Set(loaded.backups.map(\.id)))
+            selectedTrashBackupIDs = selectedTrashBackupIDs.intersection(Set(loaded.backupTrash.map(\.id)))
+            selectedTrashThreadIDs = selectedTrashThreadIDs.intersection(Set(loaded.threadTrash.map(\.id)))
             status = loaded.backups.isEmpty ? "No backups found" : "Found \(loaded.backups.count) backups"
         } catch {
             errorMessage = Self.readable(error)
@@ -464,8 +559,106 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func restoreSelectedTrashThread() async {
+        guard let thread = selectedTrashThreads.first else { return }
+        isLoadingBackups = true
+        errorMessage = nil
+        defer { isLoadingBackups = false }
+
+        do {
+            let store = self.store
+            try await Task.detached(priority: .userInitiated) {
+                try store.restoreTrashedThread(thread)
+            }.value
+            status = "Restored \(thread.title)"
+            selectedTrashThreadIDs.remove(thread.id)
+            await refresh()
+            await refreshBackups()
+            selectedProjectID = thread.cwd
+            setSelection([thread.threadID], preferredID: thread.threadID, shouldLoadPreview: true)
+        } catch {
+            errorMessage = Self.readable(error)
+            status = "Restore failed"
+        }
+    }
+
+    func deleteSelectedTrashThreadsPermanently() async {
+        let targets = selectedTrashThreads
+        guard !targets.isEmpty else { return }
+        isLoadingBackups = true
+        errorMessage = nil
+        defer { isLoadingBackups = false }
+
+        let store = self.store
+        let result = await Task.detached(priority: .userInitiated) {
+            var deleted = 0
+            var failures: [String] = []
+            for thread in targets {
+                do {
+                    try store.deleteTrashedThreadPermanently(thread)
+                    deleted += 1
+                } catch {
+                    failures.append("\(thread.title): \(Self.readable(error))")
+                }
+            }
+            return (deleted: deleted, failures: failures)
+        }.value
+
+        selectedTrashThreadIDs.subtract(Set(targets.map(\.id)))
+        await refreshBackups()
+        if result.failures.isEmpty {
+            status = "Deleted \(result.deleted) trashed chats"
+        } else {
+            errorMessage = result.failures.joined(separator: "\n")
+            status = "Deleted \(result.deleted) chats, \(result.failures.count) failed"
+        }
+    }
+
+    func revealSelectedTrashThreadsInFinder() {
+        guard !isDemoMode else {
+            status = "Demo mode has no local trash files"
+            return
+        }
+        let urls = selectedTrashThreads.compactMap { thread -> URL? in
+            if let trashPath = thread.trashPath {
+                return URL(fileURLWithPath: trashPath)
+            }
+            return URL(fileURLWithPath: thread.manifestPath)
+        }
+        guard !urls.isEmpty else { return }
+        NSWorkspace.shared.activateFileViewerSelecting(urls)
+    }
+
+    func copySelectedTrashThreadPaths() {
+        let paths = selectedTrashThreads.map { thread in
+            thread.trashPath ?? thread.manifestPath
+        }
+        guard !paths.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(paths.joined(separator: "\n"), forType: .string)
+        status = paths.count == 1 ? "Trash path copied" : "\(paths.count) trash paths copied"
+    }
+
+    func revealSelectedTrashBackupsInFinder() {
+        guard !isDemoMode else {
+            status = "Demo mode has no local backup trash files"
+            return
+        }
+        let urls = selectedTrashBackups.map(\.url)
+        guard !urls.isEmpty else { return }
+        NSWorkspace.shared.activateFileViewerSelecting(urls)
+    }
+
+    func copySelectedTrashBackupPaths() {
+        let paths = selectedTrashBackups.map(\.path)
+        guard !paths.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(paths.joined(separator: "\n"), forType: .string)
+        status = paths.count == 1 ? "Trash backup path copied" : "\(paths.count) trash backup paths copied"
+    }
+
     func emptyBackupTrash() async {
-        guard !backupTrash.isEmpty else { return }
+        guard trashItemCount > 0 else { return }
         isLoadingBackups = true
         errorMessage = nil
         defer { isLoadingBackups = false }
@@ -473,10 +666,15 @@ final class AppModel: ObservableObject {
         do {
             let store = self.store
             let removed = try await Task.detached(priority: .userInitiated) {
-                try store.emptyBackupTrash()
+                let backups = try store.emptyBackupTrash()
+                let threads = try store.emptyThreadTrash()
+                return backups + threads
             }.value
             backupTrash.removeAll()
-            status = "Deleted \(removed) backup files"
+            threadTrash.removeAll()
+            selectedTrashBackupIDs.removeAll()
+            selectedTrashThreadIDs.removeAll()
+            status = "Deleted \(removed) trashed items"
             await refreshBackups()
         } catch {
             errorMessage = Self.readable(error)
