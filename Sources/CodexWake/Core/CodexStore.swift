@@ -12,7 +12,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
     init(codexHome: URL? = nil) {
         let home = codexHome ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
         self.codexHome = home
-        self.stateDB = home.appendingPathComponent("state_5.sqlite")
+        self.stateDB = home.appendingPathComponent("sqlite", isDirectory: true).appendingPathComponent("state_5.sqlite")
         self.sessionIndex = home.appendingPathComponent("session_index.jsonl")
         self.backupTrash = home.appendingPathComponent(".codex-wake-trash", isDirectory: true)
         self.threadTrash = backupTrash.appendingPathComponent("threads", isDirectory: true)
@@ -21,9 +21,10 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
     func loadThreads() throws -> [CodexThread] {
         guard fileManager.fileExists(atPath: codexHome.path) else { throw WakeError.missingCodexHome(codexHome) }
         guard fileManager.fileExists(atPath: stateDB.path) else { throw WakeError.missingStateDatabase(stateDB) }
+        try validateStateDatabase(stateDB)
 
         let index = try loadSessionIndex()
-        let rows = try loadThreadRows()
+        let rows = try loadThreadRows(from: stateDB)
         return rows.map { row in
             let indexEntry = index[row.id]
             return CodexThread(
@@ -638,7 +639,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         return removed
     }
 
-    private func loadThreadRows() throws -> [ThreadRow] {
+    private func loadThreadRows(from stateDB: URL) throws -> [ThreadRow] {
         let query = """
         select id, rollout_path, created_at, updated_at, source, coalesce(thread_source, '') as thread_source,
                has_user_event, archived,
@@ -921,16 +922,66 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         return regex.stringByReplacingMatches(in: text, range: range, withTemplate: replacement)
     }
 
+    private func validateStateDatabase(_ stateDB: URL) throws {
+        let columns = try loadThreadColumns(in: stateDB)
+        let requiredColumns: Set<String> = [
+            "id", "rollout_path", "created_at", "updated_at", "source", "model_provider",
+            "cwd", "title", "sandbox_policy", "approval_mode", "tokens_used",
+            "has_user_event", "archived", "archived_at", "git_sha", "git_branch",
+            "git_origin_url", "cli_version", "first_user_message", "agent_nickname",
+            "agent_role", "memory_mode", "model", "reasoning_effort", "agent_path",
+            "created_at_ms", "updated_at_ms", "thread_source", "preview"
+        ]
+        let missing = requiredColumns.subtracting(columns).sorted()
+        guard missing.isEmpty else {
+            throw WakeError.commandFailed(
+                "Unsupported Codex state schema in \(stateDB.path). Missing columns: \(missing.joined(separator: ", ")). Codex Keeper stopped before changing local metadata."
+            )
+        }
+    }
+
+    private func loadThreadColumns(in stateDB: URL) throws -> Set<String> {
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(stateDB.path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+              let database
+        else {
+            throw WakeError.commandFailed("Cannot open SQLite database: \(stateDB.path)")
+        }
+        defer { sqlite3_close(database) }
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "pragma table_info(threads);", -1, &statement, nil) == SQLITE_OK,
+              let statement
+        else {
+            let message = String(cString: sqlite3_errmsg(database))
+            throw WakeError.commandFailed("Cannot inspect SQLite schema in \(stateDB.path): \(message)")
+        }
+        defer { sqlite3_finalize(statement) }
+
+        var columns = Set<String>()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            columns.insert(text(statement, 1))
+        }
+        guard !columns.isEmpty else {
+            throw WakeError.commandFailed("Unsupported Codex state schema in \(stateDB.path). Table 'threads' was not found.")
+        }
+        return columns
+    }
+
     private func backupStateFiles(stamp: String) throws -> [String] {
-        let names = ["state_5.sqlite", "state_5.sqlite-wal", "state_5.sqlite-shm"]
         var paths: [String] = []
-        for name in names {
-            let url = codexHome.appendingPathComponent(name)
-            if fileManager.fileExists(atPath: url.path) {
-                paths.append(try backup(url, suffix: stamp).path)
-            }
+        for url in stateFiles(for: stateDB) where fileManager.fileExists(atPath: url.path) {
+            paths.append(try backup(url, suffix: stamp).path)
         }
         return paths
+    }
+
+    private func stateFiles(for stateDB: URL) -> [URL] {
+        [
+            stateDB,
+            URL(fileURLWithPath: stateDB.path + "-wal"),
+            URL(fileURLWithPath: stateDB.path + "-shm")
+        ]
     }
 
     private func backup(_ url: URL, suffix: String) throws -> URL {

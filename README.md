@@ -16,7 +16,7 @@ This fork keeps the app as a dense **Liquid Glass** desktop utility while pullin
 - Liquid Glass three-pane UI for projects, chats, and detail preview.
 - Compact search field with an inline icon-only **Deep Search** action.
 - Multi-select chat actions with shift/command selection, context menus, keyboard navigation, and batch repair/move/trash.
-- `Not indexed` session state when a chat exists in `state_5.sqlite` but is missing from `session_index.jsonl`.
+- `Not indexed` session state when a chat exists in `~/.codex/sqlite/state_5.sqlite` but is missing from `session_index.jsonl`.
 - **Repair Index** adds missing `session_index.jsonl` entries for chats that need metadata repair.
 - Safe **Move to Trash** support for chats, including selected chats.
 - Backup Manager **Trash** tab with trashed chat restore and permanent delete actions.
@@ -58,7 +58,7 @@ The interface is intentionally work-focused:
 Codex Keeper reads local Codex Desktop files:
 
 ```text
-~/.codex/state_5.sqlite
+~/.codex/sqlite/state_5.sqlite
 ~/.codex/session_index.jsonl
 ~/.codex/sessions/**/*.jsonl
 ```
