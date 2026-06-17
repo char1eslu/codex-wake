@@ -83,6 +83,9 @@ private struct ProjectRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
+                Image(systemName: project.systemImage)
+                    .foregroundStyle(isSelected ? .white : .secondary)
+                    .frame(width: 16)
                 Text(project.name)
                     .lineLimit(1)
                 Spacer()

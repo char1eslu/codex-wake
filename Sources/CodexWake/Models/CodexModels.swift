@@ -37,6 +37,10 @@ struct CodexThread: Identifiable, Hashable {
         URL(fileURLWithPath: cwd).lastPathComponent.isEmpty ? cwd : URL(fileURLWithPath: cwd).lastPathComponent
     }
 
+    var projectID: String {
+        ProjectSummary.projectID(for: cwd)
+    }
+
     var needsRepair: Bool {
         if archived { return false }
         if !fileExists { return false }
@@ -68,7 +72,12 @@ struct CodexThread: Identifiable, Hashable {
 
 struct ProjectSummary: Identifiable, Hashable {
     static let allID = "__all__"
+    static let chatsID = "__chats__"
     static let all = ProjectSummary(id: allID, name: "All Projects", path: "", totalCount: 0, repairCount: 0, availableCount: 0, latestUpdatedAt: nil)
+    private static let codexChatsRoot = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Documents", isDirectory: true)
+        .appendingPathComponent("Codex", isDirectory: true)
+        .standardizedFileURL
 
     let id: String
     let name: String
@@ -78,19 +87,42 @@ struct ProjectSummary: Identifiable, Hashable {
     let availableCount: Int
     let latestUpdatedAt: Date?
 
+    var systemImage: String {
+        switch id {
+        case Self.allID: return "tray.full"
+        case Self.chatsID: return "text.bubble"
+        default: return "folder"
+        }
+    }
+
+    static func projectID(for cwd: String) -> String {
+        isCodexChatPath(cwd) ? chatsID : cwd
+    }
+
+    private static func isCodexChatPath(_ cwd: String) -> Bool {
+        let path = URL(fileURLWithPath: cwd).standardizedFileURL.path
+        let root = codexChatsRoot.path
+        return path == root || path.hasPrefix(root + "/")
+    }
+
     static func make(from threads: [CodexThread], sort: ProjectSortMode = .recent) -> [ProjectSummary] {
-        let grouped = Dictionary(grouping: threads, by: \.cwd)
-        let projects = grouped.map { cwd, items in
-            ProjectSummary(
-                id: cwd,
-                name: URL(fileURLWithPath: cwd).lastPathComponent.isEmpty ? cwd : URL(fileURLWithPath: cwd).lastPathComponent,
-                path: cwd,
+        let grouped = Dictionary(grouping: threads) { $0.projectID }
+        let projects = grouped.map { projectID, items -> ProjectSummary in
+            let firstCWD = items.first?.cwd ?? projectID
+            return ProjectSummary(
+                id: projectID,
+                name: projectID == chatsID
+                    ? "Chats"
+                    : (URL(fileURLWithPath: firstCWD).lastPathComponent.isEmpty ? firstCWD : URL(fileURLWithPath: firstCWD).lastPathComponent),
+                path: projectID == chatsID ? "" : projectID,
                 totalCount: items.count,
                 repairCount: items.filter(\.needsRepair).count,
                 availableCount: items.filter(\.isAvailable).count,
                 latestUpdatedAt: items.map(\.updatedAt).max()
             )
         }
+        let pinnedChats = projects.filter { $0.id == chatsID }
+        let regularProjects = projects.filter { $0.id != chatsID }
         .sorted { lhs, rhs in
             switch sort {
             case .recent:
@@ -113,7 +145,7 @@ struct ProjectSummary: Identifiable, Hashable {
             availableCount: threads.filter(\.isAvailable).count,
             latestUpdatedAt: threads.map(\.updatedAt).max()
         )
-        return [all] + projects
+        return pinnedChats + [all] + regularProjects
     }
 }
 

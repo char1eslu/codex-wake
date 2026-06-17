@@ -67,7 +67,7 @@ final class AppModel: ObservableObject {
         let movableThreads = selectedThreads.filter { !$0.archived && $0.fileExists }
         guard !movableThreads.isEmpty else { return [] }
         return projects.filter { project in
-            project.id != ProjectSummary.allID && !movableThreads.allSatisfy { $0.cwd == project.path }
+            project.id != ProjectSummary.allID && project.id != ProjectSummary.chatsID && !movableThreads.allSatisfy { $0.cwd == project.path }
         }
     }
 
@@ -574,7 +574,7 @@ final class AppModel: ObservableObject {
             selectedTrashThreadIDs.remove(thread.id)
             await refresh()
             await refreshBackups()
-            selectedProjectID = thread.cwd
+            selectedProjectID = ProjectSummary.projectID(for: thread.cwd)
             setSelection([thread.threadID], preferredID: thread.threadID, shouldLoadPreview: true)
         } catch {
             errorMessage = Self.readable(error)
@@ -762,7 +762,7 @@ final class AppModel: ObservableObject {
             )
             status = "Branch created"
             await refresh()
-            selectedProjectID = thread.cwd
+            selectedProjectID = thread.projectID
             setSelection([report.newThreadID], preferredID: report.newThreadID, shouldLoadPreview: true)
         } catch {
             errorMessage = Self.readable(error)
@@ -783,7 +783,7 @@ final class AppModel: ObservableObject {
 
         let selectedProject = selectedProjectID
         let source = threads.filter { thread in
-            selectedProject == ProjectSummary.allID || thread.cwd == selectedProject
+            selectedProject == ProjectSummary.allID || thread.projectID == selectedProject
         }
         let metadataMatches = source.filter { $0.matchesMetadata(query) }
         let store = self.store
@@ -879,7 +879,7 @@ final class AppModel: ObservableObject {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         let selectedProject = selectedProjectID
         let source = threads.filter { thread in
-            selectedProject == ProjectSummary.allID || thread.cwd == selectedProject
+            selectedProject == ProjectSummary.allID || thread.projectID == selectedProject
         }
 
         guard !query.isEmpty else {
