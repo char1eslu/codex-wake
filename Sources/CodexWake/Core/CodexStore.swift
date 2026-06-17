@@ -315,12 +315,25 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         defer { try? handle.close() }
 
         let lowerQuery = query.lowercased()
+        // Keep a tail of raw bytes between chunks so a match that straddles a
+        // 512KB boundary is not missed, and so a multi-byte UTF-8 character cut
+        // at the boundary is re-joined instead of dropping the whole chunk.
+        let overlap = max(0, lowerQuery.utf8.count - 1)
+        var carry = Data()
         while true {
             if Task.isCancelled { return false }
             let data = handle.readData(ofLength: 512 * 1024)
             if data.isEmpty { return false }
-            guard let chunk = String(data: data, encoding: .utf8)?.lowercased() else { continue }
-            if chunk.contains(lowerQuery) { return true }
+            var buffer = carry
+            buffer.append(data)
+            if let chunk = String(data: buffer, encoding: .utf8)?.lowercased(),
+               chunk.contains(lowerQuery) {
+                return true
+            }
+            // Carry the trailing bytes (including a possibly split character)
+            // forward to the next read so a boundary-straddling match survives.
+            let tailCount = min(overlap + 3, buffer.count)
+            carry = buffer.suffix(tailCount)
         }
     }
 
@@ -541,25 +554,34 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
             changed.append(thread.rolloutPath)
         }
 
-        let manifest = TrashedThreadManifest(
-            version: 1,
-            threadID: thread.id,
-            title: thread.shortTitle,
-            originalPath: thread.rolloutPath,
-            trashPath: trashedPath,
-            cwd: thread.cwd,
-            trashedAt: WakeDates.isoNowForJSONL(),
-            sqliteRecord: sqliteRecord,
-            sessionIndexEntry: sessionIndexEntry
-        )
-        try writeTrashManifest(manifest, to: trashDirectory.appendingPathComponent("manifest.json"))
+        // The chat file is already moved. If any metadata step below fails,
+        // move it back so we never leave the DB pointing at a missing file.
+        do {
+            let manifest = TrashedThreadManifest(
+                version: 1,
+                threadID: thread.id,
+                title: thread.shortTitle,
+                originalPath: thread.rolloutPath,
+                trashPath: trashedPath,
+                cwd: thread.cwd,
+                trashedAt: WakeDates.isoNowForJSONL(),
+                sqliteRecord: sqliteRecord,
+                sessionIndexEntry: sessionIndexEntry
+            )
+            try writeTrashManifest(manifest, to: trashDirectory.appendingPathComponent("manifest.json"))
 
-        try deleteSQLiteThread(threadID: thread.id)
-        changed.append(stateDB.path)
+            try deleteSQLiteThread(threadID: thread.id)
+            changed.append(stateDB.path)
 
-        if fileManager.fileExists(atPath: sessionIndex.path) {
-            try removeSessionIndexEntry(threadID: thread.id)
-            changed.append(sessionIndex.path)
+            if fileManager.fileExists(atPath: sessionIndex.path) {
+                try removeSessionIndexEntry(threadID: thread.id)
+                changed.append(sessionIndex.path)
+            }
+        } catch {
+            if let trashedPath, fileExists, !fileManager.fileExists(atPath: rolloutURL.path) {
+                try? fileManager.moveItem(at: URL(fileURLWithPath: trashedPath), to: rolloutURL)
+            }
+            throw error
         }
 
         return TrashThreadReport(
@@ -969,11 +991,45 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
     }
 
     private func backupStateFiles(stamp: String) throws -> [String] {
+        // Prefer a consistent SQLite snapshot via VACUUM INTO: it captures all
+        // committed WAL content into one standalone file and avoids the torn
+        // snapshot risk of copying state/-wal/-shm separately while Codex is
+        // running. Falls back to plain file copies if VACUUM is unavailable.
+        guard fileManager.fileExists(atPath: stateDB.path) else { return [] }
+        let destination = stateDB.deletingLastPathComponent()
+            .appendingPathComponent(stateDB.lastPathComponent + ".codex-rescue-backup-" + stamp)
+        if let snapshot = try? vacuumSnapshot(of: stateDB, to: destination) {
+            return [snapshot.path]
+        }
         var paths: [String] = []
         for url in stateFiles(for: stateDB) where fileManager.fileExists(atPath: url.path) {
             paths.append(try backup(url, suffix: stamp).path)
         }
         return paths
+    }
+
+    private func vacuumSnapshot(of source: URL, to destination: URL) throws -> URL {
+        if fileManager.fileExists(atPath: destination.path) {
+            try fileManager.removeItem(at: destination)
+        }
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(source.path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+              let database
+        else {
+            if let database { sqlite3_close(database) }
+            throw WakeError.commandFailed("Cannot open SQLite database for snapshot: \(source.path)")
+        }
+        defer { sqlite3_close(database) }
+
+        let escaped = destination.path.replacingOccurrences(of: "'", with: "''")
+        var errorMessage: UnsafeMutablePointer<CChar>?
+        guard sqlite3_exec(database, "vacuum into '\(escaped)';", nil, nil, &errorMessage) == SQLITE_OK else {
+            let message = errorMessage.map { String(cString: $0) } ?? "unknown error"
+            sqlite3_free(errorMessage)
+            try? fileManager.removeItem(at: destination)
+            throw WakeError.commandFailed("VACUUM INTO failed: \(message)")
+        }
+        return destination
     }
 
     private func stateFiles(for stateDB: URL) -> [URL] {

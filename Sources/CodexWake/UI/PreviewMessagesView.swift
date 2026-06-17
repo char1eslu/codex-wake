@@ -48,6 +48,7 @@ struct PreviewMessagesView: View {
                     }
                 }
                 MessagePreview(message: message)
+                    .equatable()
             }
         }
         .alert("Trim from here?", isPresented: isTrimConfirmationPresented) {
@@ -174,6 +175,7 @@ private struct ContextPreviewDisclosure: View {
             if isExpanded {
                 ForEach(messages) { message in
                     MessagePreview(message: message, startsExpanded: false)
+                        .equatable()
                 }
             }
         }
@@ -211,6 +213,7 @@ private struct OlderMessagesDisclosure: View {
             if isExpanded {
                 ForEach(messages) { message in
                     MessagePreview(message: message)
+                        .equatable()
                 }
             }
         }
@@ -224,7 +227,7 @@ private struct OlderMessagesDisclosure: View {
     }
 }
 
-private struct MessagePreview: View {
+private struct MessagePreview: View, Equatable {
     let message: PreviewMessage
     let startsExpanded: Bool
     @State private var isExpanded: Bool
@@ -233,6 +236,10 @@ private struct MessagePreview: View {
         self.message = message
         self.startsExpanded = startsExpanded
         _isExpanded = State(initialValue: startsExpanded)
+    }
+
+    static func == (lhs: MessagePreview, rhs: MessagePreview) -> Bool {
+        lhs.message == rhs.message && lhs.startsExpanded == rhs.startsExpanded
     }
 
     private var roleStyle: PreviewRoleStyle {
@@ -266,6 +273,7 @@ private struct MessagePreview: View {
                     text: displayText,
                     isMuted: roleStyle.isContext
                 )
+                .equatable()
             }
 
             if shouldCollapse {
@@ -318,10 +326,14 @@ private struct MessagePreview: View {
     }
 }
 
-private struct MarkdownPreviewText: View {
+private struct MarkdownPreviewText: View, Equatable {
     let messageID: String
     let text: String
     let isMuted: Bool
+
+    static func == (lhs: MarkdownPreviewText, rhs: MarkdownPreviewText) -> Bool {
+        lhs.messageID == rhs.messageID && lhs.text == rhs.text && lhs.isMuted == rhs.isMuted
+    }
 
     private var blocks: [MarkdownPreviewBlock] {
         MarkdownPreviewBlock.blocks(from: text, messageID: messageID)
