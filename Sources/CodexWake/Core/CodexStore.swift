@@ -672,12 +672,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         from threads
         order by updated_at desc;
         """
-        var database: OpaquePointer?
-        guard sqlite3_open_v2(stateDB.path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
-              let database
-        else {
-            throw WakeError.commandFailed("Cannot open SQLite database")
-        }
+        let database = try openReadOnlyImmutable(stateDB)
         defer { sqlite3_close(database) }
 
         var statement: OpaquePointer?
@@ -963,12 +958,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
     }
 
     private func loadThreadColumns(in stateDB: URL) throws -> Set<String> {
-        var database: OpaquePointer?
-        guard sqlite3_open_v2(stateDB.path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
-              let database
-        else {
-            throw WakeError.commandFailed("Cannot open SQLite database: \(stateDB.path)")
-        }
+        let database = try openReadOnlyImmutable(stateDB)
         defer { sqlite3_close(database) }
 
         var statement: OpaquePointer?
@@ -1006,6 +996,27 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
             paths.append(try backup(url, suffix: stamp).path)
         }
         return paths
+    }
+
+    // Codex Desktop keeps the state DB in WAL mode. A plain read-only
+    // connection must map the -shm shared-memory file, which newer Codex
+    // builds can leave in a state that fails to open (SQLITE_CANTOPEN 14),
+    // intermittently yielding zero rows. Opening with immutable=1 reads the
+    // main database file directly and bypasses WAL/shm, trading "may miss the
+    // newest un-checkpointed rows" for "always opens". Read-only only.
+    private func openReadOnlyImmutable(_ url: URL) throws -> OpaquePointer {
+        var allowed = CharacterSet(charactersIn: "/")
+        allowed.formUnion(.alphanumerics)
+        let encodedPath = url.path.addingPercentEncoding(withAllowedCharacters: allowed) ?? url.path
+        let uri = "file:\(encodedPath)?immutable=1"
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(uri, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_URI, nil) == SQLITE_OK,
+              let database
+        else {
+            if let database { sqlite3_close(database) }
+            throw WakeError.commandFailed("Cannot open SQLite database: \(url.path)")
+        }
+        return database
     }
 
     private func vacuumSnapshot(of source: URL, to destination: URL) throws -> URL {
@@ -1101,12 +1112,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         from threads
         where id = '\(sql(threadID))';
         """
-        var database: OpaquePointer?
-        guard sqlite3_open_v2(stateDB.path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
-              let database
-        else {
-            throw WakeError.commandFailed("Cannot open SQLite database")
-        }
+        let database = try openReadOnlyImmutable(stateDB)
         defer { sqlite3_close(database) }
 
         var statement: OpaquePointer?
