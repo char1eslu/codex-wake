@@ -22,6 +22,8 @@ This fork keeps the app as a dense **Liquid Glass** desktop utility while pullin
 - Backup Manager **Trash** tab with trashed chat restore and permanent delete actions.
 - Full-chat preview with turn-aware **Trim from here** and **Branch from here** controls.
 - Backup Manager with chat-backup restore, move-to-trash, and empty-trash actions.
+- Bundled `codex-keeper` CLI with `doctor`, chat/project/backup inspection, JSON output, and wake dry-runs.
+- App menu actions for installing or uninstalling the bundled CLI without changing the app itself.
 - Refresh no longer blocks on backup scans or preview parsing, reducing stuck global spinner cases.
 - SwiftPM macOS run workflow with `script/build_and_run.sh` and a Codex Run action.
 - Local `.app` bundle builds are ad-hoc signed for stricter local codesign validation.
@@ -40,6 +42,7 @@ This fork keeps the app as a dense **Liquid Glass** desktop utility while pullin
 - Trim a chat from a selected user message, with a backup created first.
 - Branch a new chat from an earlier Codex turn without changing the original.
 - Reveal chat JSONL files in Finder or copy their paths.
+- Use the `codex-keeper` CLI for terminal workflows and automation-safe JSON output.
 
 ## UI Notes
 
@@ -106,6 +109,48 @@ You can also launch it with:
 CODEX_WAKE_DEMO=1 "dist/Codex Keeper.app/Contents/MacOS/CodexWake"
 ```
 
+## Command Line Tool
+
+Codex Keeper bundles a `codex-keeper` CLI inside the app.
+
+After installing the app, open the **Codex Keeper** app menu and choose **Install Command Line Tool...**. The app copies the bundled CLI to:
+
+```text
+~/.local/bin/codex-keeper
+```
+
+To remove the terminal command later, choose **Uninstall Command Line Tool...** from the same app menu. This only removes the copy in `~/.local/bin`; the Codex Keeper app and its bundled CLI remain unchanged.
+
+If your shell cannot find `codex-keeper`, make sure `~/.local/bin` is on your `PATH`:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Useful read-only commands:
+
+```sh
+codex-keeper doctor
+codex-keeper chats list --limit 20
+codex-keeper chats search "release plan" --deep --json
+codex-keeper chats show <thread-id-or-prefix>
+codex-keeper projects list --json
+codex-keeper backups list --limit 20 --json
+```
+
+Preview a repair/wake operation without writing files:
+
+```sh
+codex-keeper chats wake <thread-id-or-prefix> --dry-run
+codex-keeper chats wake <thread-id-or-prefix> --dry-run --json
+```
+
+Run the actual repair/wake operation only after reviewing the dry-run output:
+
+```sh
+codex-keeper chats wake <thread-id-or-prefix>
+```
+
 ## Build And Run
 
 Requirements:
@@ -119,11 +164,19 @@ Build the executable:
 swift build
 ```
 
+Build only the CLI:
+
+```sh
+swift build --product codex-keeper
+```
+
 Build a local `.app` bundle:
 
 ```sh
 ./scripts/build-app.sh
 ```
+
+The app bundle includes the `codex-keeper` CLI so the app menu can install and uninstall the terminal command.
 
 Run the app through the macOS development entrypoint:
 

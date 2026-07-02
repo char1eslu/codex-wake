@@ -1,4 +1,5 @@
 import SwiftUI
+import CodexKeeperCore
 
 struct ThreadListView: View {
     @EnvironmentObject private var model: AppModel

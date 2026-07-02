@@ -1,4 +1,5 @@
 import SwiftUI
+import CodexKeeperCore
 
 struct BackupManagerView: View {
     @EnvironmentObject private var model: AppModel

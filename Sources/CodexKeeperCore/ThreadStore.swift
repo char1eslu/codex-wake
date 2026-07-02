@@ -1,6 +1,7 @@
 import Foundation
 
-protocol ThreadStore: Sendable {
+package protocol ThreadStore: Sendable {
+    func loadActiveStateRoot() throws -> ActiveStateRoot?
     func loadThreads() throws -> [CodexThread]
     func loadBackups() throws -> [BackupFile]
     func loadBackupTrash() throws -> [BackupFile]

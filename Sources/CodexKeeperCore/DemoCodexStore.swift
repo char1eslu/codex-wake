@@ -1,13 +1,19 @@
 import Foundation
 
-final class DemoCodexStore: ThreadStore, @unchecked Sendable {
+package final class DemoCodexStore: ThreadStore, @unchecked Sendable {
     private let baseDate = Date(timeIntervalSince1970: 1_779_750_000)
     private let lock = NSLock()
     private var movedProjects: [String: String] = [:]
     private var trashedBackupIDs = Set<String>()
     private var trashedThreadIDs = Set<String>()
 
-    func loadThreads() throws -> [CodexThread] {
+    package init() {}
+
+    package func loadActiveStateRoot() throws -> ActiveStateRoot? {
+        nil
+    }
+
+    package func loadThreads() throws -> [CodexThread] {
         let trashedThreads = trashedThreadSnapshot()
         return loadAllDemoThreads()
             .filter { !trashedThreads.contains($0.id) }
@@ -65,17 +71,17 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
         }
     }
 
-    func loadBackups() throws -> [BackupFile] {
+    package func loadBackups() throws -> [BackupFile] {
         return demoBackupSamples()
             .filter { !trashedBackupSnapshot().contains($0.id) }
     }
 
-    func loadBackupTrash() throws -> [BackupFile] {
+    package func loadBackupTrash() throws -> [BackupFile] {
         demoBackupSamples()
             .filter { trashedBackupSnapshot().contains($0.id) }
     }
 
-    func loadThreadTrash() throws -> [TrashedThread] {
+    package func loadThreadTrash() throws -> [TrashedThread] {
         let trashedThreads = trashedThreadSnapshot()
         return loadAllDemoThreads()
             .filter { trashedThreads.contains($0.id) }
@@ -125,7 +131,7 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
         }
     }
 
-    func loadPreview(for thread: CodexThread) throws -> ThreadPreview {
+    package func loadPreview(for thread: CodexThread) throws -> ThreadPreview {
         let messages = [
             PreviewMessage(
                 role: "user",
@@ -171,7 +177,7 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
         return ThreadPreview(threadID: thread.id, messages: messages, rawError: nil)
     }
 
-    func threadContainsRawText(_ thread: CodexThread, query: String) throws -> Bool {
+    package func threadContainsRawText(_ thread: CodexThread, query: String) throws -> Bool {
         let q = query.lowercased()
         return [thread.sessionIndexTitle, thread.title, thread.firstUserMessage, thread.preview, thread.cwd]
             .joined(separator: "\n")
@@ -179,7 +185,7 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
             .contains(q)
     }
 
-    func wake(thread: CodexThread) throws -> WakeReport {
+    package func wake(thread: CodexThread) throws -> WakeReport {
         WakeReport(
             threadID: thread.id,
             timestamp: "demo",
@@ -188,7 +194,7 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
         )
     }
 
-    func trim(thread: CodexThread, fromLine lineNumber: Int) throws -> TrimReport {
+    package func trim(thread: CodexThread, fromLine lineNumber: Int) throws -> TrimReport {
         TrimReport(
             threadID: thread.id,
             timestamp: "demo",
@@ -199,7 +205,7 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
         )
     }
 
-    func branch(thread: CodexThread, fromLine lineNumber: Int) throws -> BranchReport {
+    package func branch(thread: CodexThread, fromLine lineNumber: Int) throws -> BranchReport {
         BranchReport(
             sourceThreadID: thread.id,
             newThreadID: "demo-branch-\(thread.id)",
@@ -213,7 +219,7 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
         )
     }
 
-    func move(thread: CodexThread, to project: ProjectSummary) throws -> MoveReport {
+    package func move(thread: CodexThread, to project: ProjectSummary) throws -> MoveReport {
         lock.lock()
         movedProjects[thread.id] = project.path
         lock.unlock()
@@ -228,7 +234,7 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
         )
     }
 
-    func moveThreadToTrash(_ thread: CodexThread) throws -> TrashThreadReport {
+    package func moveThreadToTrash(_ thread: CodexThread) throws -> TrashThreadReport {
         lock.lock()
         trashedThreadIDs.insert(thread.id)
         lock.unlock()
@@ -244,31 +250,31 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
         )
     }
 
-    func restoreTrashedThread(_ thread: TrashedThread) throws {
+    package func restoreTrashedThread(_ thread: TrashedThread) throws {
         lock.lock()
         trashedThreadIDs.remove(thread.id)
         lock.unlock()
     }
 
-    func deleteTrashedThreadPermanently(_ thread: TrashedThread) throws {
+    package func deleteTrashedThreadPermanently(_ thread: TrashedThread) throws {
         lock.lock()
         trashedThreadIDs.remove(thread.id)
         lock.unlock()
     }
 
-    func restoreBackup(_ backup: BackupFile) throws {
+    package func restoreBackup(_ backup: BackupFile) throws {
         guard backup.kind == .chatFile else {
             throw WakeError.commandFailed("Only chat file backups can be restored.")
         }
     }
 
-    func moveBackupToTrash(_ backup: BackupFile) throws {
+    package func moveBackupToTrash(_ backup: BackupFile) throws {
         lock.lock()
         trashedBackupIDs.insert(backup.id)
         lock.unlock()
     }
 
-    func emptyBackupTrash() throws -> Int {
+    package func emptyBackupTrash() throws -> Int {
         lock.lock()
         let count = trashedBackupIDs.count
         trashedBackupIDs.removeAll()
@@ -276,7 +282,7 @@ final class DemoCodexStore: ThreadStore, @unchecked Sendable {
         return count
     }
 
-    func emptyThreadTrash() throws -> Int {
+    package func emptyThreadTrash() throws -> Int {
         lock.lock()
         let count = trashedThreadIDs.count
         trashedThreadIDs.removeAll()

@@ -4,6 +4,7 @@ set -euo pipefail
 MODE="${1:-run}"
 APP_NAME="CodexWake"
 APP_DISPLAY_NAME="Codex Keeper"
+CLI_BINARY_NAME="codex-keeper"
 BUNDLE_ID="app.codexwake.CodexWake"
 MIN_SYSTEM_VERSION="14.0"
 
@@ -22,11 +23,16 @@ pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
 swift build
 BUILD_BINARY="$(swift build --show-bin-path)/$APP_NAME"
+BUILD_CLI_BINARY="$(swift build --show-bin-path)/$CLI_BINARY_NAME"
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
+if [[ -x "$BUILD_CLI_BINARY" ]]; then
+  cp "$BUILD_CLI_BINARY" "$APP_MACOS/$CLI_BINARY_NAME"
+  chmod +x "$APP_MACOS/$CLI_BINARY_NAME"
+fi
 
 if [[ -f "$ROOT_DIR/Resources/Info.plist" ]]; then
   cp "$ROOT_DIR/Resources/Info.plist" "$INFO_PLIST"

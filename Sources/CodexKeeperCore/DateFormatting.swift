@@ -1,62 +1,62 @@
 import Foundation
 
-enum WakeDates {
-    static let sqliteJSONDecoder: JSONDecoder = {
+package enum WakeDates {
+    package static let sqliteJSONDecoder: JSONDecoder = {
         let decoder = JSONDecoder()
         return decoder
     }()
 
-    static func dateFromSeconds(_ seconds: Int64?) -> Date? {
+    package static func dateFromSeconds(_ seconds: Int64?) -> Date? {
         guard let seconds else { return nil }
         return Date(timeIntervalSince1970: TimeInterval(seconds))
     }
 
-    static func dateFromMilliseconds(_ milliseconds: Int64?) -> Date? {
+    package static func dateFromMilliseconds(_ milliseconds: Int64?) -> Date? {
         guard let milliseconds else { return nil }
         return Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1000.0)
     }
 
-    static func parseISO(_ string: String?) -> Date? {
+    package static func parseISO(_ string: String?) -> Date? {
         guard let string, !string.isEmpty else { return nil }
         if let date = isoWithFraction.date(from: string) { return date }
         if let date = isoNoFraction.date(from: string) { return date }
         return ISO8601DateFormatter().date(from: string)
     }
 
-    static func isoNowForJSONL() -> String {
+    package static func isoNowForJSONL() -> String {
         let now = Date()
         let fraction = now.timeIntervalSince1970.truncatingRemainder(dividingBy: 1)
         let milliseconds = Int((fraction * 1000).rounded(.down))
         return isoBase.string(from: now).replacingOccurrences(of: "Z", with: String(format: ".%03dZ", milliseconds))
     }
 
-    static func isoNowForIndex() -> String {
+    package static func isoNowForIndex() -> String {
         let now = Date()
         let micros = Int(now.timeIntervalSince1970.truncatingRemainder(dividingBy: 1) * 1_000_000)
         return isoBase.string(from: now).replacingOccurrences(of: "Z", with: String(format: ".%06dZ", micros))
     }
 
-    static func display(_ date: Date?) -> String {
+    package static func display(_ date: Date?) -> String {
         guard let date else { return "-" }
         return displayFormatter.string(from: date)
     }
 
-    static func shortDate(_ date: Date?) -> String {
+    package static func shortDate(_ date: Date?) -> String {
         guard let date else { return "-" }
         return shortDateFormatter.string(from: date)
     }
 
-    static func compactDisplay(_ date: Date?) -> String {
+    package static func compactDisplay(_ date: Date?) -> String {
         guard let date else { return "-" }
         return compactFormatter.string(from: date)
     }
 
-    static func displayBackupStamp(_ stamp: String) -> String {
+    package static func displayBackupStamp(_ stamp: String) -> String {
         guard let date = dateFromBackupStamp(stamp) else { return stamp }
         return displayFormatter.string(from: date)
     }
 
-    static func dateFromBackupStamp(_ stamp: String) -> Date? {
+    package static func dateFromBackupStamp(_ stamp: String) -> Date? {
         let datePart = String(stamp.prefix(15))
         return backupStampFormatter.date(from: datePart)
     }

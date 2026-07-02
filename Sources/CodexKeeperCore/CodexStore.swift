@@ -1,7 +1,7 @@
 import Foundation
 import SQLite3
 
-final class CodexStore: ThreadStore, @unchecked Sendable {
+package final class CodexStore: ThreadStore, @unchecked Sendable {
     private let fileManager = FileManager.default
     private let codexHome: URL
     private let stateDB: URL
@@ -9,7 +9,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
     private let backupTrash: URL
     private let threadTrash: URL
 
-    init(codexHome: URL? = nil) {
+    package init(codexHome: URL? = nil) {
         let home = codexHome ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
         self.codexHome = home
         self.stateDB = home.appendingPathComponent("sqlite", isDirectory: true).appendingPathComponent("state_5.sqlite")
@@ -18,7 +18,54 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         self.threadTrash = backupTrash.appendingPathComponent("threads", isDirectory: true)
     }
 
-    func loadThreads() throws -> [CodexThread] {
+    package func loadActiveStateRoot() throws -> ActiveStateRoot? {
+        guard fileManager.fileExists(atPath: stateDB.path) else { return nil }
+        try validateStateDatabase(stateDB)
+        return ActiveStateRoot(kind: .modern, path: stateDB.path)
+    }
+
+    package func diagnostics() throws -> CodexDiagnostics {
+        let threads = (try? loadThreads()) ?? []
+        let projects = ProjectSummary.make(from: threads)
+        let backups = (try? loadBackups()) ?? []
+        let backupTrash = (try? loadBackupTrash()) ?? []
+        let threadTrash = (try? loadThreadTrash()) ?? []
+        let stateExists = fileManager.fileExists(atPath: stateDB.path)
+        let stateStatus = StateRootStatus(
+            kind: .modern,
+            path: stateDB.path,
+            isPrimary: true,
+            exists: stateExists
+        )
+        return CodexDiagnostics(
+            codexHome: codexHome.path,
+            sessionIndexPath: sessionIndex.path,
+            sessionIndexExists: fileManager.fileExists(atPath: sessionIndex.path),
+            sessionsPath: codexHome.appendingPathComponent("sessions", isDirectory: true).path,
+            sessionsExists: fileManager.fileExists(atPath: codexHome.appendingPathComponent("sessions", isDirectory: true).path),
+            stateRoots: [stateStatus],
+            activeStateRoot: stateExists ? ActiveStateRoot(kind: .modern, path: stateDB.path) : nil,
+            threadCount: threads.count,
+            projectCount: projects.filter { !$0.isSynthetic }.count,
+            backupCount: backups.count,
+            trashCount: backupTrash.count + threadTrash.count
+        )
+    }
+
+    package func wakePlan(for thread: CodexThread) throws -> WakePlan {
+        WakePlan(
+            threadID: thread.id,
+            title: thread.shortTitle,
+            project: thread.projectName,
+            projectPath: thread.cwd,
+            updatedAt: thread.updatedAt,
+            rolloutPath: thread.rolloutPath,
+            sessionIndexPath: sessionIndex.path,
+            stateDatabasePaths: fileManager.fileExists(atPath: stateDB.path) ? [stateDB.path] : []
+        )
+    }
+
+    package func loadThreads() throws -> [CodexThread] {
         guard fileManager.fileExists(atPath: codexHome.path) else { throw WakeError.missingCodexHome(codexHome) }
         guard fileManager.fileExists(atPath: stateDB.path) else { throw WakeError.missingStateDatabase(stateDB) }
         try validateStateDatabase(stateDB)
@@ -53,17 +100,17 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         .sorted { $0.updatedAt > $1.updatedAt }
     }
 
-    func loadBackups() throws -> [BackupFile] {
+    package func loadBackups() throws -> [BackupFile] {
         guard fileManager.fileExists(atPath: codexHome.path) else { throw WakeError.missingCodexHome(codexHome) }
         return try scanBackups(in: codexHome, includeTrash: false)
     }
 
-    func loadBackupTrash() throws -> [BackupFile] {
+    package func loadBackupTrash() throws -> [BackupFile] {
         guard fileManager.fileExists(atPath: backupTrash.path) else { return [] }
         return try scanBackups(in: backupTrash, includeTrash: true)
     }
 
-    func loadThreadTrash() throws -> [TrashedThread] {
+    package func loadThreadTrash() throws -> [TrashedThread] {
         guard fileManager.fileExists(atPath: threadTrash.path) else { return [] }
         let keys: [URLResourceKey] = [.isRegularFileKey]
         guard let enumerator = fileManager.enumerator(
@@ -172,7 +219,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         }
     }
 
-    func moveBackupToTrash(_ backup: BackupFile) throws {
+    package func moveBackupToTrash(_ backup: BackupFile) throws {
         let source = URL(fileURLWithPath: backup.backupPath).standardizedFileURL
         guard source.path.hasPrefix(codexHome.standardizedFileURL.path + "/"),
               source.lastPathComponent.contains(".codex-rescue-backup-")
@@ -190,7 +237,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         try fileManager.moveItem(at: source, to: destination)
     }
 
-    func restoreBackup(_ backupFile: BackupFile) throws {
+    package func restoreBackup(_ backupFile: BackupFile) throws {
         guard backupFile.kind == .chatFile else {
             throw WakeError.commandFailed("Only chat file backups can be restored.")
         }
@@ -224,7 +271,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         }
     }
 
-    func emptyBackupTrash() throws -> Int {
+    package func emptyBackupTrash() throws -> Int {
         guard fileManager.fileExists(atPath: backupTrash.path) else { return 0 }
         let keys: [URLResourceKey] = [.isRegularFileKey]
         guard let enumerator = fileManager.enumerator(
@@ -250,7 +297,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         return removed
     }
 
-    func loadPreview(for thread: CodexThread) throws -> ThreadPreview {
+    package func loadPreview(for thread: CodexThread) throws -> ThreadPreview {
         guard fileManager.fileExists(atPath: thread.rolloutPath) else {
             throw WakeError.missingThreadFile(thread.rolloutPath)
         }
@@ -308,7 +355,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         return ThreadPreview(threadID: thread.id, messages: messages, rawError: nil)
     }
 
-    func threadContainsRawText(_ thread: CodexThread, query: String) throws -> Bool {
+    package func threadContainsRawText(_ thread: CodexThread, query: String) throws -> Bool {
         guard fileManager.fileExists(atPath: thread.rolloutPath) else { return false }
         guard query.count >= 3 else { return false }
         let handle = try FileHandle(forReadingFrom: thread.rolloutURL)
@@ -337,7 +384,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         }
     }
 
-    func wake(thread: CodexThread) throws -> WakeReport {
+    package func wake(thread: CodexThread) throws -> WakeReport {
         guard fileManager.fileExists(atPath: thread.rolloutPath) else {
             throw WakeError.missingThreadFile(thread.rolloutPath)
         }
@@ -365,7 +412,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         return WakeReport(threadID: thread.id, timestamp: stamp, backups: backups, changedFiles: changed)
     }
 
-    func trim(thread: CodexThread, fromLine lineNumber: Int) throws -> TrimReport {
+    package func trim(thread: CodexThread, fromLine lineNumber: Int) throws -> TrimReport {
         guard fileManager.fileExists(atPath: thread.rolloutPath) else {
             throw WakeError.missingThreadFile(thread.rolloutPath)
         }
@@ -401,7 +448,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         )
     }
 
-    func branch(thread: CodexThread, fromLine lineNumber: Int) throws -> BranchReport {
+    package func branch(thread: CodexThread, fromLine lineNumber: Int) throws -> BranchReport {
         guard fileManager.fileExists(atPath: thread.rolloutPath) else {
             throw WakeError.missingThreadFile(thread.rolloutPath)
         }
@@ -492,7 +539,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         )
     }
 
-    func move(thread: CodexThread, to project: ProjectSummary) throws -> MoveReport {
+    package func move(thread: CodexThread, to project: ProjectSummary) throws -> MoveReport {
         guard !project.path.isEmpty else {
             throw WakeError.commandFailed("Cannot move to All Projects")
         }
@@ -524,7 +571,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         )
     }
 
-    func moveThreadToTrash(_ thread: CodexThread) throws -> TrashThreadReport {
+    package func moveThreadToTrash(_ thread: CodexThread) throws -> TrashThreadReport {
         let rolloutURL = thread.rolloutURL.standardizedFileURL
         let sessionsRoot = codexHome.appendingPathComponent("sessions", isDirectory: true).standardizedFileURL
         let fileExists = fileManager.fileExists(atPath: rolloutURL.path)
@@ -595,7 +642,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         )
     }
 
-    func restoreTrashedThread(_ thread: TrashedThread) throws {
+    package func restoreTrashedThread(_ thread: TrashedThread) throws {
         let manifestURL = URL(fileURLWithPath: thread.manifestPath).standardizedFileURL
         guard manifestURL.path.hasPrefix(threadTrash.standardizedFileURL.path + "/") else {
             throw WakeError.commandFailed("Refusing to restore a chat outside Codex Keeper trash.")
@@ -634,7 +681,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         try deleteTrashDirectory(containing: manifestURL)
     }
 
-    func deleteTrashedThreadPermanently(_ thread: TrashedThread) throws {
+    package func deleteTrashedThreadPermanently(_ thread: TrashedThread) throws {
         let manifestURL = URL(fileURLWithPath: thread.manifestPath).standardizedFileURL
         guard manifestURL.path.hasPrefix(threadTrash.standardizedFileURL.path + "/") else {
             throw WakeError.commandFailed("Refusing to delete a file outside Codex Keeper trash.")
@@ -642,7 +689,7 @@ final class CodexStore: ThreadStore, @unchecked Sendable {
         try deleteTrashDirectory(containing: manifestURL)
     }
 
-    func emptyThreadTrash() throws -> Int {
+    package func emptyThreadTrash() throws -> Int {
         guard fileManager.fileExists(atPath: threadTrash.path) else { return 0 }
         let directories = try fileManager.contentsOfDirectory(
             at: threadTrash,

@@ -12,6 +12,18 @@ struct CodexWakeApp: App {
         }
         .defaultSize(width: MainWindowMetrics.defaultSize.width, height: MainWindowMetrics.defaultSize.height)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Install Command Line Tool...") {
+                    Task { await model.installCommandLineTool() }
+                }
+                .disabled(model.isInstallingCommandLineTool || model.isUninstallingCommandLineTool)
+
+                Button("Uninstall Command Line Tool...") {
+                    Task { await model.uninstallCommandLineTool() }
+                }
+                .disabled(model.isInstallingCommandLineTool || model.isUninstallingCommandLineTool)
+            }
+
             CommandGroup(replacing: .newItem) {
                 Button("Refresh") {
                     Task { await model.refresh() }

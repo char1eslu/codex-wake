@@ -1,4 +1,6 @@
 import Foundation
+import AppKit
+import CodexKeeperCore
 import SwiftUI
 
 @MainActor
@@ -29,6 +31,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var isPreviewLoading = false
     @Published var operationReport: OperationReport?
     @Published private(set) var isDemoMode: Bool
+    @Published private(set) var isInstallingCommandLineTool = false
+    @Published private(set) var isUninstallingCommandLineTool = false
 
     private let store: any ThreadStore
     private var deepSearchTask: Task<Void, Never>?
@@ -161,6 +165,44 @@ final class AppModel: ObservableObject {
         } catch {
             errorMessage = Self.readable(error)
             status = "Error"
+        }
+    }
+
+    func installCommandLineTool() async {
+        guard !isInstallingCommandLineTool else { return }
+        isInstallingCommandLineTool = true
+        status = "Installing CLI..."
+        errorMessage = nil
+        defer { isInstallingCommandLineTool = false }
+
+        do {
+            let result = try CommandLineToolInstaller.installBundledCLI()
+            status = "Installed CLI"
+            showCommandLineToolInstallAlert(result)
+        } catch {
+            let message = Self.readable(error)
+            errorMessage = message
+            status = "CLI install failed"
+            showCommandLineToolInstallError(message)
+        }
+    }
+
+    func uninstallCommandLineTool() async {
+        guard !isUninstallingCommandLineTool else { return }
+        isUninstallingCommandLineTool = true
+        status = "Uninstalling CLI..."
+        errorMessage = nil
+        defer { isUninstallingCommandLineTool = false }
+
+        do {
+            let result = try CommandLineToolInstaller.uninstallCLI()
+            status = result.didRemove ? "Uninstalled CLI" : "CLI was not installed"
+            showCommandLineToolUninstallAlert(result)
+        } catch {
+            let message = Self.readable(error)
+            errorMessage = message
+            status = "CLI uninstall failed"
+            showCommandLineToolUninstallError(message)
         }
     }
 
@@ -1001,6 +1043,63 @@ final class AppModel: ObservableObject {
         let args = ProcessInfo.processInfo.arguments
         let env = ProcessInfo.processInfo.environment
         return args.contains("--demo") || env["CODEX_WAKE_DEMO"] == "1"
+    }
+
+    private func showCommandLineToolInstallAlert(_ result: CommandLineToolInstallResult) {
+        let alert = NSAlert()
+        alert.messageText = "Command line tool installed"
+        alert.informativeText = """
+        Installed codex-keeper to:
+        \(result.installedPath)
+
+        Run:
+        codex-keeper --help
+        """
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private func showCommandLineToolInstallError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Could not install command line tool"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private func showCommandLineToolUninstallAlert(_ result: CommandLineToolUninstallResult) {
+        let alert = NSAlert()
+        if result.didRemove {
+            alert.messageText = "Command line tool uninstalled"
+            alert.informativeText = """
+            Removed:
+            \(result.installPath)
+
+            The Codex Keeper app is unchanged.
+            """
+        } else {
+            alert.messageText = "Command line tool was not installed"
+            alert.informativeText = """
+            Nothing was removed at:
+            \(result.installPath)
+
+            The Codex Keeper app is unchanged.
+            """
+        }
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private func showCommandLineToolUninstallError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Could not uninstall command line tool"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 }
 

@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import CodexKeeperCore
 
 struct PreviewMessagesView: View {
     @EnvironmentObject private var model: AppModel

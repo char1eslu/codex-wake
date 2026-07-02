@@ -1,4 +1,5 @@
 import SwiftUI
+import CodexKeeperCore
 
 struct ProjectSidebarView: View {
     @EnvironmentObject private var model: AppModel

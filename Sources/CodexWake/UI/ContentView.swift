@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import CodexKeeperCore
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel

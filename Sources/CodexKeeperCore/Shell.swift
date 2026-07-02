@@ -1,7 +1,7 @@
 import Foundation
 
-struct Shell {
-    static func run(_ executable: String, _ arguments: [String]) throws -> String {
+package struct Shell {
+    package static func run(_ executable: String, _ arguments: [String]) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -26,14 +26,14 @@ struct Shell {
     }
 }
 
-enum WakeError: LocalizedError {
+package enum WakeError: LocalizedError {
     case commandFailed(String)
     case missingCodexHome(URL)
     case missingStateDatabase(URL)
     case invalidJSON(String)
     case missingThreadFile(String)
 
-    var errorDescription: String? {
+    package var errorDescription: String? {
         switch self {
         case .commandFailed(let message):
             return message.trimmingCharacters(in: .whitespacesAndNewlines)

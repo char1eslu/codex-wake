@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import CodexKeeperCore
 
 struct ThreadDetailView: View {
     @EnvironmentObject private var model: AppModel
