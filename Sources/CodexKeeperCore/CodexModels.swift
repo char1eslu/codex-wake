@@ -165,12 +165,6 @@ package enum ProjectSortMode: String, CaseIterable, Identifiable {
     package var id: String { rawValue }
 }
 
-package enum AppSection {
-    case chats
-    case backups
-    case backupTrash
-}
-
 package struct ActiveStateRoot: Hashable {
     package enum Kind: String {
         case modern
@@ -386,43 +380,6 @@ package struct OperationReport: Identifiable {
         self.changedFiles = changedFiles
         self.failures = failures
     }
-}
-
-package struct BatchWakeReport: Identifiable {
-    package let id = UUID()
-    package let completedAt: Date
-    package let requestedCount: Int
-    package let succeeded: [BatchWakeSuccess]
-    package let skipped: [BatchWakeSkipped]
-    package let failed: [BatchWakeFailure]
-
-    package var backupCount: Int {
-        succeeded.reduce(0) { $0 + $1.backupCount }
-    }
-}
-
-package struct BatchWakeSuccess: Identifiable, Hashable {
-    package let threadID: String
-    package let title: String
-    package let backupCount: Int
-
-    package var id: String { threadID }
-}
-
-package struct BatchWakeSkipped: Identifiable, Hashable {
-    package let threadID: String
-    package let title: String
-    package let reason: String
-
-    package var id: String { threadID }
-}
-
-package struct BatchWakeFailure: Identifiable, Hashable {
-    package let threadID: String
-    package let title: String
-    package let message: String
-
-    package var id: String { threadID }
 }
 
 package struct BackupFile: Identifiable, Hashable {

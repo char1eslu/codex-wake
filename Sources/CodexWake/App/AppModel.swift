@@ -316,31 +316,10 @@ final class AppModel: ObservableObject {
         defer { isLoading = false }
 
         let store = self.store
-        let result = await Task.detached(priority: .userInitiated) {
-            var backups: [String] = []
-            var changedFiles: [String] = []
-            var failures: [String] = []
-            var successIDs: Set<String> = []
-
-            for thread in targets {
-                do {
-                    let report = try store.wake(thread: thread)
-                    backups.append(contentsOf: report.backups)
-                    changedFiles.append(contentsOf: report.changedFiles)
-                    successIDs.insert(thread.id)
-                } catch {
-                    failures.append("\(thread.shortTitle): \(Self.readable(error))")
-                }
-            }
-
-            return BatchOperationResult(
-                targetIDs: Set(targets.map(\.id)),
-                successIDs: successIDs,
-                backups: backups,
-                changedFiles: changedFiles,
-                failures: failures
-            )
-        }.value
+        let result = await Self.runThreadBatch(targets: targets) { thread in
+            let report = try store.wake(thread: thread)
+            return (backups: report.backups, changedFiles: report.changedFiles)
+        }
 
         operationReport = OperationReport(
             title: "Repair Index complete",
@@ -379,31 +358,10 @@ final class AppModel: ObservableObject {
         defer { isLoading = false }
 
         let store = self.store
-        let result = await Task.detached(priority: .userInitiated) {
-            var backups: [String] = []
-            var changedFiles: [String] = []
-            var failures: [String] = []
-            var successIDs: Set<String> = []
-
-            for thread in targets {
-                do {
-                    let report = try store.move(thread: thread, to: project)
-                    backups.append(contentsOf: report.backups)
-                    changedFiles.append(contentsOf: report.changedFiles)
-                    successIDs.insert(thread.id)
-                } catch {
-                    failures.append("\(thread.shortTitle): \(Self.readable(error))")
-                }
-            }
-
-            return BatchOperationResult(
-                targetIDs: Set(targets.map(\.id)),
-                successIDs: successIDs,
-                backups: backups,
-                changedFiles: changedFiles,
-                failures: failures
-            )
-        }.value
+        let result = await Self.runThreadBatch(targets: targets) { thread in
+            let report = try store.move(thread: thread, to: project)
+            return (backups: report.backups, changedFiles: report.changedFiles)
+        }
 
         operationReport = OperationReport(
             title: "Move complete",
@@ -437,31 +395,10 @@ final class AppModel: ObservableObject {
         defer { isLoading = false }
 
         let store = self.store
-        let result = await Task.detached(priority: .userInitiated) {
-            var backups: [String] = []
-            var changedFiles: [String] = []
-            var failures: [String] = []
-            var successIDs: Set<String> = []
-
-            for thread in targets {
-                do {
-                    let report = try store.moveThreadToTrash(thread)
-                    backups.append(contentsOf: report.backups)
-                    changedFiles.append(contentsOf: report.changedFiles)
-                    successIDs.insert(thread.id)
-                } catch {
-                    failures.append("\(thread.shortTitle): \(Self.readable(error))")
-                }
-            }
-
-            return BatchOperationResult(
-                targetIDs: Set(targets.map(\.id)),
-                successIDs: successIDs,
-                backups: backups,
-                changedFiles: changedFiles,
-                failures: failures
-            )
-        }.value
+        let result = await Self.runThreadBatch(targets: targets) { thread in
+            let report = try store.moveThreadToTrash(thread)
+            return (backups: report.backups, changedFiles: report.changedFiles)
+        }
 
         operationReport = OperationReport(
             title: "Move to Trash complete",
@@ -477,6 +414,37 @@ final class AppModel: ObservableObject {
         invalidatePreviewCache(for: result.successIDs)
         await refresh()
         await refreshBackups()
+    }
+
+    private nonisolated static func runThreadBatch(
+        targets: [CodexThread],
+        operation: @escaping @Sendable (CodexThread) throws -> (backups: [String], changedFiles: [String])
+    ) async -> BatchOperationResult {
+        await Task.detached(priority: .userInitiated) {
+            var backups: [String] = []
+            var changedFiles: [String] = []
+            var failures: [String] = []
+            var successIDs: Set<String> = []
+
+            for thread in targets {
+                do {
+                    let files = try operation(thread)
+                    backups.append(contentsOf: files.backups)
+                    changedFiles.append(contentsOf: files.changedFiles)
+                    successIDs.insert(thread.id)
+                } catch {
+                    failures.append("\(thread.shortTitle): \(Self.readable(error))")
+                }
+            }
+
+            return BatchOperationResult(
+                targetIDs: Set(targets.map(\.id)),
+                successIDs: successIDs,
+                backups: backups,
+                changedFiles: changedFiles,
+                failures: failures
+            )
+        }.value
     }
 
     func revealSelectedInFinder() {

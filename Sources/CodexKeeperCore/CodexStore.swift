@@ -871,20 +871,6 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         return result
     }
 
-    private func loadSessionMeta(path: String) -> SessionMetaLine? {
-        guard fileManager.fileExists(atPath: path) else { return nil }
-        guard let prefix = try? readPrefix(of: URL(fileURLWithPath: path), maxBytes: 64 * 1024) else { return nil }
-        return SessionMetaLine(
-            timestamp: firstCapture(in: prefix, pattern: #"^\{"timestamp":"([^"]+)""#),
-            payload: .init(
-                id: firstCapture(in: prefix, pattern: #""payload":\{"id":"([^"]+)""#),
-                timestamp: firstCapture(in: prefix, pattern: #""payload":\{"id":"[^"]+","timestamp":"([^"]+)""#),
-                cwd: firstCapture(in: prefix, pattern: #""cwd":"([^"]+)""#),
-                source: firstCapture(in: prefix, pattern: #""source":"([^"]+)""#)
-            )
-        )
-    }
-
     private func readPrefix(of url: URL, maxBytes: Int) throws -> String {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
@@ -1257,29 +1243,6 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         );
         """
         _ = try Shell.run("/usr/bin/sqlite3", [stateDB.path, statementSQL])
-    }
-
-    private func updateSessionIndex(threadID: String, updatedAt: String) throws {
-        guard fileManager.fileExists(atPath: sessionIndex.path) else { return }
-        let text = try String(contentsOf: sessionIndex, encoding: .utf8)
-        var lines: [String] = []
-        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            if line.isEmpty { continue }
-            guard let data = String(line).data(using: .utf8),
-                  var obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else {
-                lines.append(String(line))
-                continue
-            }
-            if obj["id"] as? String == threadID {
-                obj["updated_at"] = updatedAt
-                let encoded = try JSONSerialization.data(withJSONObject: obj, options: [])
-                lines.append(String(data: encoded, encoding: .utf8) ?? String(line))
-            } else {
-                lines.append(String(line))
-            }
-        }
-        try (lines.joined(separator: "\n") + "\n").write(to: sessionIndex, atomically: true, encoding: .utf8)
     }
 
     private func removeSessionIndexEntry(threadID: String) throws {
@@ -1657,16 +1620,4 @@ private struct ThreadSQLiteRecord: Codable {
     let updatedAtMs: Int64?
     let threadSource: String?
     let preview: String
-}
-
-private struct SessionMetaLine: Decodable {
-    let timestamp: String?
-    let payload: Payload?
-
-    struct Payload: Decodable {
-        let id: String?
-        let timestamp: String?
-        let cwd: String?
-        let source: String?
-    }
 }
