@@ -709,6 +709,15 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
     }
 
     private func loadThreadRows(from stateDB: URL) throws -> [ThreadRow] {
+        do {
+            return try loadThreadRows(from: try openReadOnly(stateDB))
+        } catch {
+            return try loadThreadRows(from: try openReadOnlyImmutable(stateDB))
+        }
+    }
+
+    private func loadThreadRows(from database: OpaquePointer) throws -> [ThreadRow] {
+        defer { sqlite3_close(database) }
         let query = """
         select id, rollout_path, created_at, updated_at, source, coalesce(thread_source, '') as thread_source,
                has_user_event, archived,
@@ -719,9 +728,6 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         from threads
         order by updated_at desc;
         """
-        let database = try openReadOnlyImmutable(stateDB)
-        defer { sqlite3_close(database) }
-
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK,
               let statement
@@ -732,7 +738,8 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         defer { sqlite3_finalize(statement) }
 
         var rows: [ThreadRow] = []
-        while sqlite3_step(statement) == SQLITE_ROW {
+        var result = sqlite3_step(statement)
+        while result == SQLITE_ROW {
             rows.append(
                 ThreadRow(
                     id: text(statement, 0),
@@ -751,6 +758,10 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
                     updated_at_ms: int64(statement, 13)
                 )
             )
+            result = sqlite3_step(statement)
+        }
+        guard result == SQLITE_DONE else {
+            throw WakeError.commandFailed("Cannot read SQLite threads: \(String(cString: sqlite3_errmsg(database)))")
         }
         return rows
     }
@@ -1031,12 +1042,19 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         return paths
     }
 
-    // Codex Desktop keeps the state DB in WAL mode. A plain read-only
-    // connection must map the -shm shared-memory file, which newer Codex
-    // builds can leave in a state that fails to open (SQLITE_CANTOPEN 14),
-    // intermittently yielding zero rows. Opening with immutable=1 reads the
-    // main database file directly and bypasses WAL/shm, trading "may miss the
-    // newest un-checkpointed rows" for "always opens". Read-only only.
+    private func openReadOnly(_ url: URL) throws -> OpaquePointer {
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+              let database
+        else {
+            if let database { sqlite3_close(database) }
+            throw WakeError.commandFailed("Cannot open SQLite database: \(url.path)")
+        }
+        return database
+    }
+
+    // Some Codex builds leave -shm unreadable. Keep immutable as a fallback;
+    // it may be stale because it intentionally ignores uncheckpointed WAL.
     private func openReadOnlyImmutable(_ url: URL) throws -> OpaquePointer {
         var allowed = CharacterSet(charactersIn: "/")
         allowed.formUnion(.alphanumerics)
