@@ -6,6 +6,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
     private let codexHome: URL
     private let stateDB: URL
     private let sessionIndex: URL
+    private let globalState: URL
     private let backupTrash: URL
     private let threadTrash: URL
 
@@ -14,6 +15,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         self.codexHome = home
         self.stateDB = home.appendingPathComponent("sqlite", isDirectory: true).appendingPathComponent("state_5.sqlite")
         self.sessionIndex = home.appendingPathComponent("session_index.jsonl")
+        self.globalState = home.appendingPathComponent(".codex-global-state.json")
         self.backupTrash = home.appendingPathComponent(".codex-wake-trash", isDirectory: true)
         self.threadTrash = backupTrash.appendingPathComponent("threads", isDirectory: true)
     }
@@ -25,7 +27,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
     }
 
     package func diagnostics() throws -> CodexDiagnostics {
-        let threads = (try? loadThreads()) ?? []
+        let threads = try loadThreads()
         let projects = ProjectSummary.make(from: threads)
         let backups = (try? loadBackups()) ?? []
         let backupTrash = (try? loadBackupTrash()) ?? []
@@ -72,8 +74,17 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
 
         let index = try loadSessionIndex()
         let rows = try loadThreadRows(from: stateDB)
+        let spawnEdges = try loadSpawnEdges(from: stateDB)
+        var childCounts: [String: Int] = [:]
+        for row in rows {
+            if let parent = spawnEdges[row.id]?.parentThreadID ?? parentThreadID(from: row.source) {
+                childCounts[parent, default: 0] += 1
+            }
+        }
         return rows.map { row in
             let indexEntry = index[row.id]
+            let edge = spawnEdges[row.id]
+            let parentThreadID = edge?.parentThreadID ?? parentThreadID(from: row.source)
             return CodexThread(
                 id: row.id,
                 rolloutPath: row.rollout_path,
@@ -83,6 +94,9 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
                 updatedAtMs: WakeDates.dateFromMilliseconds(row.updated_at_ms),
                 source: row.source,
                 threadSource: row.thread_source ?? "",
+                parentThreadID: parentThreadID,
+                spawnStatus: edge?.status,
+                childThreadCount: childCounts[row.id] ?? 0,
                 hasUserEvent: (row.has_user_event ?? 0) != 0,
                 archived: (row.archived ?? 0) != 0,
                 title: metadataText(row.title, maxLength: 240),
@@ -97,6 +111,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
                 fileExists: fileManager.fileExists(atPath: row.rollout_path)
             )
         }
+        .filter(\.isUserFacing)
         .sorted { $0.updatedAt > $1.updatedAt }
     }
 
@@ -385,6 +400,9 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
     }
 
     package func wake(thread: CodexThread) throws -> WakeReport {
+        guard thread.isUserFacing, thread.hasUserEvent else {
+            throw WakeError.commandFailed("Subagent chats cannot be added to the user session index.")
+        }
         guard fileManager.fileExists(atPath: thread.rolloutPath) else {
             throw WakeError.missingThreadFile(thread.rolloutPath)
         }
@@ -540,6 +558,9 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
     }
 
     package func move(thread: CodexThread, to project: ProjectSummary) throws -> MoveReport {
+        guard thread.isUserFacing else {
+            throw WakeError.commandFailed("Subagent chats follow their parent chat and cannot be moved independently.")
+        }
         guard !project.path.isEmpty else {
             throw WakeError.commandFailed("Cannot move to All Projects")
         }
@@ -552,14 +573,35 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         var backups: [String] = []
         var changed: [String] = []
 
+        guard fileManager.fileExists(atPath: globalState.path) else {
+            throw WakeError.commandFailed("Codex global project metadata is missing: \(globalState.path)")
+        }
+        let originalGlobalState = try Data(contentsOf: globalState)
+        let movedGlobalState = try globalStateDataMoving(
+            originalGlobalState,
+            threadID: thread.id,
+            destinationPath: project.path
+        )
+        let originalRollout = try Data(contentsOf: thread.rolloutURL)
+        let movedRollout = try sessionMetaDataMoving(originalRollout, cwd: project.path)
+
         backups += try backupStateFiles(stamp: backupSuffix)
+        backups.append(try backup(globalState, suffix: backupSuffix).path)
         backups.append(try backup(thread.rolloutURL, suffix: backupSuffix).path)
 
-        try updateSQLiteProject(threadID: thread.id, cwd: project.path)
-        changed.append(stateDB.path)
-
-        try updateSessionMetaProject(path: thread.rolloutURL, cwd: project.path)
-        changed.append(thread.rolloutPath)
+        do {
+            try writeDataAtomically(movedGlobalState, to: globalState)
+            changed.append(globalState.path)
+            try writeDataAtomically(movedRollout, to: thread.rolloutURL)
+            changed.append(thread.rolloutPath)
+            try updateSQLiteProject(threadID: thread.id, cwd: project.path)
+            changed.append(stateDB.path)
+        } catch {
+            try? writeDataAtomically(originalGlobalState, to: globalState)
+            try? writeDataAtomically(originalRollout, to: thread.rolloutURL)
+            try? updateSQLiteProject(threadID: thread.id, cwd: thread.cwd)
+            throw error
+        }
 
         return MoveReport(
             threadID: thread.id,
@@ -572,6 +614,9 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
     }
 
     package func moveThreadToTrash(_ thread: CodexThread) throws -> TrashThreadReport {
+        guard thread.isUserFacing else {
+            throw WakeError.commandFailed("Subagent chats follow their parent chat and cannot be deleted independently.")
+        }
         let rolloutURL = thread.rolloutURL.standardizedFileURL
         let sessionsRoot = codexHome.appendingPathComponent("sessions", isDirectory: true).standardizedFileURL
         let fileExists = fileManager.fileExists(atPath: rolloutURL.path)
@@ -581,12 +626,22 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
 
         let sqliteRecord = try loadFullThreadRecord(threadID: thread.id)
         let sessionIndexEntry = try loadSessionIndex()[thread.id]
+        let spawnEdges = try loadSpawnEdgesReferencing(threadID: thread.id)
+        let dynamicTools = try loadDynamicTools(threadID: thread.id)
+        let externalDatabases = try externalDatabaseSnapshots(threadID: thread.id)
+        let originalGlobalState = try Data(contentsOf: globalState)
+        let removedGlobalState = try globalStateDataRemovingThread(
+            originalGlobalState,
+            threadID: thread.id
+        )
         let stamp = backupStamp()
         let backupSuffix = "\(stamp)-trash-thread"
         var backups: [String] = []
         var changed: [String] = []
 
         backups += try backupStateFiles(stamp: backupSuffix)
+        backups += try backupExternalDatabases(externalDatabases, stamp: backupSuffix)
+        backups.append(try backup(globalState, suffix: backupSuffix).path)
         if fileManager.fileExists(atPath: sessionIndex.path) {
             backups.append(try backup(sessionIndex, suffix: backupSuffix).path)
         }
@@ -605,7 +660,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         // move it back so we never leave the DB pointing at a missing file.
         do {
             let manifest = TrashedThreadManifest(
-                version: 1,
+                version: 2,
                 threadID: thread.id,
                 title: thread.shortTitle,
                 originalPath: thread.rolloutPath,
@@ -613,21 +668,43 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
                 cwd: thread.cwd,
                 trashedAt: WakeDates.isoNowForJSONL(),
                 sqliteRecord: sqliteRecord,
-                sessionIndexEntry: sessionIndexEntry
+                sessionIndexEntry: sessionIndexEntry,
+                spawnEdges: spawnEdges,
+                dynamicTools: dynamicTools,
+                projectState: removedGlobalState.projectState,
+                externalDatabases: externalDatabases
             )
             try writeTrashManifest(manifest, to: trashDirectory.appendingPathComponent("manifest.json"))
 
+            try writeDataAtomically(removedGlobalState.data, to: globalState)
+            changed.append(globalState.path)
+
             try deleteSQLiteThread(threadID: thread.id)
             changed.append(stateDB.path)
+
+            try deleteExternalDatabaseReferences(externalDatabases, threadID: thread.id)
+            changed.append(contentsOf: externalDatabases
+                .filter { !$0.rows.isEmpty }
+                .map { codexHome.appendingPathComponent($0.relativePath).path })
 
             if fileManager.fileExists(atPath: sessionIndex.path) {
                 try removeSessionIndexEntry(threadID: thread.id)
                 changed.append(sessionIndex.path)
             }
         } catch {
+            if (try? loadFullThreadRecord(threadID: thread.id)) == nil {
+                try? insertFullThreadRecord(sqliteRecord)
+                try? restoreRelatedMetadata(spawnEdges: spawnEdges, dynamicTools: dynamicTools)
+            }
+            try? restoreExternalDatabaseSnapshots(externalDatabases)
+            try? writeDataAtomically(originalGlobalState, to: globalState)
+            if let sessionIndexEntry {
+                try? appendSessionIndexEntry(sessionIndexEntry)
+            }
             if let trashedPath, fileExists, !fileManager.fileExists(atPath: rolloutURL.path) {
                 try? fileManager.moveItem(at: URL(fileURLWithPath: trashedPath), to: rolloutURL)
             }
+            try? fileManager.removeItem(at: trashDirectory)
             throw error
         }
 
@@ -659,6 +736,16 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
 
         let backupSuffix = "\(backupStamp())-before-trash-restore"
         _ = try backupStateFiles(stamp: backupSuffix)
+        _ = try backupExternalDatabases(manifest.externalDatabases ?? [], stamp: backupSuffix)
+        let currentGlobalState = try Data(contentsOf: globalState)
+        if let projectState = manifest.projectState {
+            _ = try backup(globalState, suffix: backupSuffix)
+            _ = try globalStateDataRestoringThread(
+                currentGlobalState,
+                threadID: manifest.threadID,
+                projectState: projectState
+            )
+        }
         if fileManager.fileExists(atPath: sessionIndex.path) {
             _ = try backup(sessionIndex, suffix: backupSuffix)
         }
@@ -674,11 +761,38 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
             try fileManager.copyItem(at: trashURL, to: originalURL)
         }
 
-        try insertFullThreadRecord(manifest.sqliteRecord)
-        if let entry = manifest.sessionIndexEntry {
-            try appendSessionIndexEntry(entry)
+        do {
+            try insertFullThreadRecord(manifest.sqliteRecord)
+            try restoreRelatedMetadata(
+                spawnEdges: manifest.spawnEdges ?? [],
+                dynamicTools: manifest.dynamicTools ?? []
+            )
+            try restoreExternalDatabaseSnapshots(manifest.externalDatabases ?? [])
+            if let entry = manifest.sessionIndexEntry {
+                try appendSessionIndexEntry(entry)
+            }
+            if let projectState = manifest.projectState {
+                let restoredGlobalState = try globalStateDataRestoringThread(
+                    currentGlobalState,
+                    threadID: manifest.threadID,
+                    projectState: projectState
+                )
+                try writeDataAtomically(restoredGlobalState, to: globalState)
+            }
+            try deleteTrashDirectory(containing: manifestURL)
+        } catch {
+            try? deleteSQLiteThread(threadID: manifest.threadID)
+            try? deleteExternalDatabaseReferences(
+                manifest.externalDatabases ?? [],
+                threadID: manifest.threadID
+            )
+            try? removeSessionIndexEntry(threadID: manifest.threadID)
+            try? writeDataAtomically(currentGlobalState, to: globalState)
+            if !thread.originalExists {
+                try? fileManager.removeItem(at: originalURL)
+            }
+            throw error
         }
-        try deleteTrashDirectory(containing: manifestURL)
     }
 
     package func deleteTrashedThreadPermanently(_ thread: TrashedThread) throws {
@@ -764,6 +878,55 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
             throw WakeError.commandFailed("Cannot read SQLite threads: \(String(cString: sqlite3_errmsg(database)))")
         }
         return rows
+    }
+
+    private func loadSpawnEdges(from stateDB: URL) throws -> [String: ThreadSpawnEdgeRecord] {
+        let database: OpaquePointer
+        do {
+            database = try openReadOnly(stateDB)
+        } catch {
+            database = try openReadOnlyImmutable(stateDB)
+        }
+        defer { sqlite3_close(database) }
+
+        var existsStatement: OpaquePointer?
+        let existsSQL = "select 1 from sqlite_master where type = 'table' and name = 'thread_spawn_edges';"
+        guard sqlite3_prepare_v2(database, existsSQL, -1, &existsStatement, nil) == SQLITE_OK,
+              let existsStatement
+        else { return [:] }
+        defer { sqlite3_finalize(existsStatement) }
+        guard sqlite3_step(existsStatement) == SQLITE_ROW else { return [:] }
+
+        var statement: OpaquePointer?
+        let query = "select parent_thread_id, child_thread_id, status from thread_spawn_edges;"
+        guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK,
+              let statement
+        else {
+            throw WakeError.commandFailed("Cannot read Codex thread parent relationships.")
+        }
+        defer { sqlite3_finalize(statement) }
+
+        var result: [String: ThreadSpawnEdgeRecord] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let edge = ThreadSpawnEdgeRecord(
+                parentThreadID: text(statement, 0),
+                childThreadID: text(statement, 1),
+                status: text(statement, 2)
+            )
+            result[edge.childThreadID] = edge
+        }
+        return result
+    }
+
+    private func parentThreadID(from source: String) -> String? {
+        guard let data = source.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let subagent = object["subagent"] as? [String: Any],
+              let spawn = subagent["thread_spawn"] as? [String: Any],
+              let parent = spawn["parent_thread_id"] as? String,
+              !parent.isEmpty
+        else { return nil }
+        return parent
     }
 
     private func backupKind(for originalName: String) -> BackupKind {
@@ -1136,21 +1299,557 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
     }
 
     private func updateSQLiteProject(threadID: String, cwd: String) throws {
-        let escapedThreadID = threadID.replacingOccurrences(of: "'", with: "''")
-        let escapedCWD = cwd.replacingOccurrences(of: "'", with: "''")
-        let sql = """
-        update threads
-        set cwd = '\(escapedCWD)'
-        where id = '\(escapedThreadID)';
-        """
-        _ = try Shell.run("/usr/bin/sqlite3", [stateDB.path, sql])
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(
+            stateDB.path,
+            &database,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        ) == SQLITE_OK, let database else {
+            if let database { sqlite3_close(database) }
+            throw WakeError.commandFailed("Cannot open Codex state database for project move.")
+        }
+        defer { sqlite3_close(database) }
+
+        guard sqlite3_exec(database, "begin immediate;", nil, nil, nil) == SQLITE_OK else {
+            throw WakeError.commandFailed("Cannot start Codex project move transaction.")
+        }
+        let statementSQL = "update threads set cwd = '\(sql(cwd))' where id = '\(sql(threadID))';"
+        guard sqlite3_exec(database, statementSQL, nil, nil, nil) == SQLITE_OK,
+              sqlite3_changes(database) == 1,
+              sqlite3_exec(database, "commit;", nil, nil, nil) == SQLITE_OK
+        else {
+            sqlite3_exec(database, "rollback;", nil, nil, nil)
+            throw WakeError.commandFailed("Project move did not update exactly one Codex thread.")
+        }
+    }
+
+    private func globalStateDataMoving(
+        _ data: Data,
+        threadID: String,
+        destinationPath: String
+    ) throws -> Data {
+        guard var state = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let localProjects = state["local-projects"] as? [String: Any]
+        else {
+            throw WakeError.invalidJSON("Cannot decode Codex global project metadata")
+        }
+
+        let normalizedDestination = URL(fileURLWithPath: destinationPath).standardizedFileURL.path
+        let destinationProjectID = localProjects.first { _, value in
+            guard let project = value as? [String: Any],
+                  let roots = project["rootPaths"] as? [String]
+            else { return false }
+            return roots.contains {
+                URL(fileURLWithPath: $0).standardizedFileURL.path == normalizedDestination
+            }
+        }?.key
+        guard let destinationProjectID else {
+            throw WakeError.commandFailed("The destination is not a saved Codex project: \(destinationPath)")
+        }
+
+        var assignments = state["thread-project-assignments"] as? [String: Any] ?? [:]
+        assignments[threadID] = [
+            "projectKind": "local",
+            "projectId": destinationProjectID
+        ]
+        state["thread-project-assignments"] = assignments
+
+        var orders = state["sidebar-project-thread-orders"] as? [String: Any] ?? [:]
+        for (projectID, value) in orders {
+            guard var order = value as? [String: Any] else { continue }
+            let ids = (order["threadIds"] as? [String] ?? []).filter { $0 != threadID }
+            order["threadIds"] = projectID == destinationProjectID ? [threadID] + ids : ids
+            orders[projectID] = order
+        }
+        if orders[destinationProjectID] == nil {
+            orders[destinationProjectID] = ["threadIds": [threadID]]
+        }
+        state["sidebar-project-thread-orders"] = orders
+
+        if var ids = state["projectless-thread-ids"] as? [String] {
+            ids.removeAll { $0 == threadID }
+            state["projectless-thread-ids"] = ids
+        }
+        for key in ["thread-workspace-root-hints", "thread-projectless-output-directories"] {
+            if var values = state[key] as? [String: Any] {
+                values.removeValue(forKey: threadID)
+                state[key] = values
+            }
+        }
+
+        return try JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])
+    }
+
+    private func globalStateDataRemovingThread(
+        _ data: Data,
+        threadID: String
+    ) throws -> (data: Data, projectState: ThreadProjectState) {
+        guard let original = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw WakeError.invalidJSON("Cannot decode Codex global project metadata")
+        }
+        let projectState = threadProjectState(from: original, threadID: threadID)
+        guard let cleaned = removeThreadReferences(original, threadID: threadID) as? [String: Any] else {
+            throw WakeError.invalidJSON("Cannot clean Codex global project metadata")
+        }
+        return (
+            try JSONSerialization.data(withJSONObject: cleaned, options: [.sortedKeys]),
+            projectState
+        )
+    }
+
+    private func globalStateDataRestoringThread(
+        _ data: Data,
+        threadID: String,
+        projectState: ThreadProjectState
+    ) throws -> Data {
+        guard var state = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw WakeError.invalidJSON("Cannot decode Codex global project metadata")
+        }
+
+        if let projectID = projectState.projectID {
+            var assignments = state["thread-project-assignments"] as? [String: Any] ?? [:]
+            assignments[threadID] = ["projectKind": "local", "projectId": projectID]
+            state["thread-project-assignments"] = assignments
+        }
+
+        if let sidebarProjectID = projectState.sidebarProjectID {
+            var orders = state["sidebar-project-thread-orders"] as? [String: Any] ?? [:]
+            for (projectID, value) in orders {
+                guard var order = value as? [String: Any] else { continue }
+                order["threadIds"] = (order["threadIds"] as? [String] ?? []).filter { $0 != threadID }
+                orders[projectID] = order
+            }
+            var destination = orders[sidebarProjectID] as? [String: Any] ?? [:]
+            var ids = destination["threadIds"] as? [String] ?? []
+            let position = min(max(projectState.sidebarPosition ?? 0, 0), ids.count)
+            ids.insert(threadID, at: position)
+            destination["threadIds"] = ids
+            orders[sidebarProjectID] = destination
+            state["sidebar-project-thread-orders"] = orders
+        }
+
+        if projectState.wasProjectless {
+            var ids = state["projectless-thread-ids"] as? [String] ?? []
+            if !ids.contains(threadID) { ids.append(threadID) }
+            state["projectless-thread-ids"] = ids
+        }
+        if let hint = projectState.workspaceRootHint {
+            var hints = state["thread-workspace-root-hints"] as? [String: Any] ?? [:]
+            hints[threadID] = hint
+            state["thread-workspace-root-hints"] = hints
+        }
+        if let output = projectState.outputDirectory {
+            var outputs = state["thread-projectless-output-directories"] as? [String: Any] ?? [:]
+            outputs[threadID] = output
+            state["thread-projectless-output-directories"] = outputs
+        }
+        return try JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])
+    }
+
+    private func threadProjectState(from state: [String: Any], threadID: String) -> ThreadProjectState {
+        let assignment = (state["thread-project-assignments"] as? [String: Any])?[threadID] as? [String: Any]
+        var sidebarProjectID: String?
+        var sidebarPosition: Int?
+        if let orders = state["sidebar-project-thread-orders"] as? [String: Any] {
+            for (projectID, value) in orders {
+                guard let order = value as? [String: Any],
+                      let ids = order["threadIds"] as? [String],
+                      let position = ids.firstIndex(of: threadID)
+                else { continue }
+                sidebarProjectID = projectID
+                sidebarPosition = position
+                break
+            }
+        }
+        return ThreadProjectState(
+            projectID: assignment?["projectId"] as? String,
+            sidebarProjectID: sidebarProjectID,
+            sidebarPosition: sidebarPosition,
+            wasProjectless: (state["projectless-thread-ids"] as? [String] ?? []).contains(threadID),
+            workspaceRootHint: (state["thread-workspace-root-hints"] as? [String: Any])?[threadID] as? String,
+            outputDirectory: (state["thread-projectless-output-directories"] as? [String: Any])?[threadID] as? String
+        )
+    }
+
+    private func removeThreadReferences(_ value: Any, threadID: String) -> Any? {
+        if let string = value as? String {
+            return string == threadID ? nil : string
+        }
+        if let dictionary = value as? [String: Any] {
+            var result: [String: Any] = [:]
+            for (key, nestedValue) in dictionary where key != threadID {
+                if let string = nestedValue as? String, string == threadID { continue }
+                if let cleaned = removeThreadReferences(nestedValue, threadID: threadID) {
+                    result[key] = cleaned
+                }
+            }
+            return result
+        }
+        if let array = value as? [Any] {
+            return array.compactMap { removeThreadReferences($0, threadID: threadID) }
+        }
+        return value
+    }
+
+    private func sessionMetaDataMoving(_ data: Data, cwd: String) throws -> Data {
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw WakeError.invalidJSON("Cannot decode chat JSONL")
+        }
+        let parts = text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let first = parts.first,
+              let firstData = String(first).data(using: .utf8),
+              var object = try JSONSerialization.jsonObject(with: firstData) as? [String: Any]
+        else { throw WakeError.invalidJSON("Cannot decode first JSONL line") }
+
+        var payload = object["payload"] as? [String: Any] ?? [:]
+        payload["cwd"] = cwd
+        object["payload"] = payload
+        let encoded = try JSONSerialization.data(withJSONObject: object, options: [])
+        guard let firstLine = String(data: encoded, encoding: .utf8) else {
+            throw WakeError.invalidJSON("Cannot encode first JSONL line")
+        }
+        let rest = parts.count > 1 ? String(parts[1]) : ""
+        return Data((firstLine + "\n" + rest).utf8)
+    }
+
+    private func writeDataAtomically(_ data: Data, to url: URL) throws {
+        let attributes = try? fileManager.attributesOfItem(atPath: url.path)
+        try data.write(to: url, options: .atomic)
+        if let permissions = attributes?[.posixPermissions] {
+            try? fileManager.setAttributes([.posixPermissions: permissions], ofItemAtPath: url.path)
+        }
     }
 
     private func deleteSQLiteThread(threadID: String) throws {
-        _ = try Shell.run(
+        let escapedID = sql(threadID)
+        let statementSQL = """
+        begin immediate;
+        delete from thread_dynamic_tools where thread_id = '\(escapedID)';
+        delete from thread_spawn_edges where parent_thread_id = '\(escapedID)' or child_thread_id = '\(escapedID)';
+        delete from threads where id = '\(escapedID)';
+        commit;
+        """
+        _ = try Shell.run("/usr/bin/sqlite3", [stateDB.path, statementSQL])
+        let remaining = try Shell.run(
             "/usr/bin/sqlite3",
-            [stateDB.path, "delete from threads where id = '\(sql(threadID))';"]
-        )
+            [stateDB.path, "select count(*) from threads where id = '\(escapedID)';"]
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard remaining == "0" else {
+            throw WakeError.commandFailed("Thread metadata was not removed from the Codex state database.")
+        }
+    }
+
+    private func loadSpawnEdgesReferencing(threadID: String) throws -> [ThreadSpawnEdgeRecord] {
+        let database = try openReadOnly(stateDB)
+        defer { sqlite3_close(database) }
+        let query = """
+        select parent_thread_id, child_thread_id, status
+        from thread_spawn_edges
+        where parent_thread_id = '\(sql(threadID))' or child_thread_id = '\(sql(threadID))';
+        """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK,
+              let statement
+        else { return [] }
+        defer { sqlite3_finalize(statement) }
+        var result: [ThreadSpawnEdgeRecord] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.append(ThreadSpawnEdgeRecord(
+                parentThreadID: text(statement, 0),
+                childThreadID: text(statement, 1),
+                status: text(statement, 2)
+            ))
+        }
+        return result
+    }
+
+    private func loadDynamicTools(threadID: String) throws -> [ThreadDynamicToolRecord] {
+        let database = try openReadOnly(stateDB)
+        defer { sqlite3_close(database) }
+        let query = """
+        select thread_id, position, name, description, input_schema, defer_loading, namespace
+        from thread_dynamic_tools where thread_id = '\(sql(threadID))' order by position;
+        """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK,
+              let statement
+        else { return [] }
+        defer { sqlite3_finalize(statement) }
+        var result: [ThreadDynamicToolRecord] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.append(ThreadDynamicToolRecord(
+                threadID: text(statement, 0),
+                position: int64(statement, 1) ?? 0,
+                name: text(statement, 2),
+                description: text(statement, 3),
+                inputSchema: text(statement, 4),
+                deferLoading: int64(statement, 5) ?? 0,
+                namespace: nullableText(statement, 6)
+            ))
+        }
+        return result
+    }
+
+    private func restoreRelatedMetadata(
+        spawnEdges: [ThreadSpawnEdgeRecord],
+        dynamicTools: [ThreadDynamicToolRecord]
+    ) throws {
+        var statements: [String] = ["begin immediate;"]
+        for tool in dynamicTools {
+            statements.append("""
+            insert or replace into thread_dynamic_tools
+            (thread_id, position, name, description, input_schema, defer_loading, namespace)
+            values (\(sqlValue(tool.threadID)), \(tool.position), \(sqlValue(tool.name)),
+                    \(sqlValue(tool.description)), \(sqlValue(tool.inputSchema)),
+                    \(tool.deferLoading), \(sqlValue(tool.namespace)));
+            """)
+        }
+        for edge in spawnEdges {
+            statements.append("""
+            insert or replace into thread_spawn_edges (parent_thread_id, child_thread_id, status)
+            values (\(sqlValue(edge.parentThreadID)), \(sqlValue(edge.childThreadID)), \(sqlValue(edge.status)));
+            """)
+        }
+        statements.append("commit;")
+        _ = try Shell.run("/usr/bin/sqlite3", [stateDB.path, statements.joined(separator: "\n")])
+    }
+
+    private func externalDatabaseSnapshots(threadID: String) throws -> [SQLiteDatabaseSnapshot] {
+        let urls = [
+            codexHome.appendingPathComponent("sqlite/codex-dev.db"),
+            codexHome.appendingPathComponent("sqlite/codex-history-snapshots-dev.db")
+        ]
+        return try urls.compactMap { url in
+            guard fileManager.fileExists(atPath: url.path) else { return nil }
+            return try snapshotDatabase(url, threadID: threadID)
+        }
+    }
+
+    private func backupExternalDatabases(
+        _ snapshots: [SQLiteDatabaseSnapshot],
+        stamp: String
+    ) throws -> [String] {
+        var backups: [String] = []
+        for snapshot in snapshots where !snapshot.rows.isEmpty {
+            let source = codexHome.appendingPathComponent(snapshot.relativePath)
+            guard fileManager.fileExists(atPath: source.path) else { continue }
+            let destination = source.deletingLastPathComponent()
+                .appendingPathComponent(source.lastPathComponent + ".codex-rescue-backup-" + stamp)
+            if let saved = try? vacuumSnapshot(of: source, to: destination) {
+                backups.append(saved.path)
+            } else {
+                backups.append(try backup(source, suffix: stamp).path)
+            }
+        }
+        return backups
+    }
+
+    private func snapshotDatabase(_ url: URL, threadID: String) throws -> SQLiteDatabaseSnapshot {
+        let database = try openReadOnly(url)
+        defer { sqlite3_close(database) }
+        var rows: [SQLiteRowSnapshot] = []
+
+        for table in sqliteTables(database) {
+            let columns = try sqliteColumns(database, table: table)
+            let referenceColumns = ["thread_id", "parent_thread_id", "child_thread_id"]
+                .filter(columns.contains)
+            guard !referenceColumns.isEmpty else { continue }
+            let whereClause = referenceColumns
+                .map { "\(quotedIdentifier($0)) = ?" }
+                .joined(separator: " or ")
+            let query = "select * from \(quotedIdentifier(table)) where \(whereClause);"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK,
+                  let statement
+            else { throw sqliteError(database, context: "Cannot snapshot \(table)") }
+            defer { sqlite3_finalize(statement) }
+            for index in referenceColumns.indices {
+                bindText(threadID, to: statement, index: Int32(index + 1))
+            }
+            let selectedColumns = (0..<sqlite3_column_count(statement)).map {
+                String(cString: sqlite3_column_name(statement, $0))
+            }
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let values = (0..<sqlite3_column_count(statement)).map {
+                    sqliteValue(statement, index: $0)
+                }
+                rows.append(SQLiteRowSnapshot(table: table, columns: selectedColumns, values: values))
+            }
+        }
+
+        let relativePath = String(url.path.dropFirst(codexHome.path.count + 1))
+        return SQLiteDatabaseSnapshot(relativePath: relativePath, rows: rows)
+    }
+
+    private func deleteExternalDatabaseReferences(
+        _ snapshots: [SQLiteDatabaseSnapshot],
+        threadID: String
+    ) throws {
+        for snapshot in snapshots {
+            let url = codexHome.appendingPathComponent(snapshot.relativePath)
+            guard fileManager.fileExists(atPath: url.path) else { continue }
+            var database: OpaquePointer?
+            guard sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+                  let database
+            else {
+                if let database { sqlite3_close(database) }
+                throw WakeError.commandFailed("Cannot open \(snapshot.relativePath) for chat deletion.")
+            }
+            defer { sqlite3_close(database) }
+            guard sqlite3_exec(database, "begin immediate;", nil, nil, nil) == SQLITE_OK else {
+                throw sqliteError(database, context: "Cannot start chat deletion")
+            }
+            do {
+                for table in sqliteTables(database) {
+                    let columns = try sqliteColumns(database, table: table)
+                    let referenceColumns = ["thread_id", "parent_thread_id", "child_thread_id"]
+                        .filter(columns.contains)
+                    guard !referenceColumns.isEmpty else { continue }
+                    let whereClause = referenceColumns
+                        .map { "\(quotedIdentifier($0)) = '\(sql(threadID))'" }
+                        .joined(separator: " or ")
+                    let statement = "delete from \(quotedIdentifier(table)) where \(whereClause);"
+                    guard sqlite3_exec(database, statement, nil, nil, nil) == SQLITE_OK else {
+                        throw sqliteError(database, context: "Cannot clean \(table)")
+                    }
+                }
+                if snapshot.relativePath.hasSuffix("codex-dev.db") {
+                    try bumpCatalogRevision(database)
+                }
+                guard sqlite3_exec(database, "commit;", nil, nil, nil) == SQLITE_OK else {
+                    throw sqliteError(database, context: "Cannot commit chat deletion")
+                }
+            } catch {
+                sqlite3_exec(database, "rollback;", nil, nil, nil)
+                throw error
+            }
+        }
+    }
+
+    private func restoreExternalDatabaseSnapshots(_ snapshots: [SQLiteDatabaseSnapshot]) throws {
+        for snapshot in snapshots where !snapshot.rows.isEmpty {
+            let url = codexHome.appendingPathComponent(snapshot.relativePath)
+            guard fileManager.fileExists(atPath: url.path) else { continue }
+            var database: OpaquePointer?
+            guard sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+                  let database
+            else {
+                if let database { sqlite3_close(database) }
+                throw WakeError.commandFailed("Cannot open \(snapshot.relativePath) for chat restore.")
+            }
+            defer { sqlite3_close(database) }
+            guard sqlite3_exec(database, "begin immediate;", nil, nil, nil) == SQLITE_OK else {
+                throw sqliteError(database, context: "Cannot start chat restore")
+            }
+            do {
+                for row in snapshot.rows {
+                    let columns = row.columns.map(quotedIdentifier).joined(separator: ", ")
+                    let placeholders = Array(repeating: "?", count: row.values.count).joined(separator: ", ")
+                    let query = "insert or replace into \(quotedIdentifier(row.table)) (\(columns)) values (\(placeholders));"
+                    var statement: OpaquePointer?
+                    guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK,
+                          let statement
+                    else { throw sqliteError(database, context: "Cannot restore \(row.table)") }
+                    defer { sqlite3_finalize(statement) }
+                    for (index, value) in row.values.enumerated() {
+                        bindSQLiteValue(value, to: statement, index: Int32(index + 1))
+                    }
+                    guard sqlite3_step(statement) == SQLITE_DONE else {
+                        throw sqliteError(database, context: "Cannot restore \(row.table)")
+                    }
+                }
+                if snapshot.relativePath.hasSuffix("codex-dev.db") {
+                    try bumpCatalogRevision(database)
+                }
+                guard sqlite3_exec(database, "commit;", nil, nil, nil) == SQLITE_OK else {
+                    throw sqliteError(database, context: "Cannot commit chat restore")
+                }
+            } catch {
+                sqlite3_exec(database, "rollback;", nil, nil, nil)
+                throw error
+            }
+        }
+    }
+
+    private func sqliteTables(_ database: OpaquePointer) -> [String] {
+        var statement: OpaquePointer?
+        let query = "select name from sqlite_master where type = 'table' and name not like 'sqlite_%';"
+        guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK,
+              let statement
+        else { return [] }
+        defer { sqlite3_finalize(statement) }
+        var result: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW { result.append(text(statement, 0)) }
+        return result
+    }
+
+    private func bumpCatalogRevision(_ database: OpaquePointer) throws {
+        guard sqliteTables(database).contains("local_thread_catalog_metadata") else { return }
+        guard sqlite3_exec(
+            database,
+            "update local_thread_catalog_metadata set catalog_revision = catalog_revision + 1 where id = 1;",
+            nil,
+            nil,
+            nil
+        ) == SQLITE_OK else {
+            throw sqliteError(database, context: "Cannot refresh the Codex chat catalog")
+        }
+    }
+
+    private func sqliteColumns(_ database: OpaquePointer, table: String) throws -> [String] {
+        var statement: OpaquePointer?
+        let query = "pragma table_info(\(quotedIdentifier(table)));"
+        guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK,
+              let statement
+        else { throw sqliteError(database, context: "Cannot inspect \(table)") }
+        defer { sqlite3_finalize(statement) }
+        var result: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW { result.append(text(statement, 1)) }
+        return result
+    }
+
+    private func sqliteValue(_ statement: OpaquePointer, index: Int32) -> SQLiteStoredValue {
+        switch sqlite3_column_type(statement, index) {
+        case SQLITE_INTEGER: return .integer(sqlite3_column_int64(statement, index))
+        case SQLITE_FLOAT: return .real(sqlite3_column_double(statement, index))
+        case SQLITE_TEXT: return .text(text(statement, index))
+        case SQLITE_BLOB:
+            guard let bytes = sqlite3_column_blob(statement, index) else { return .blob(Data()) }
+            return .blob(Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, index))))
+        default: return .null
+        }
+    }
+
+    private func bindSQLiteValue(_ value: SQLiteStoredValue, to statement: OpaquePointer, index: Int32) {
+        switch value {
+        case .null: sqlite3_bind_null(statement, index)
+        case .integer(let value): sqlite3_bind_int64(statement, index, value)
+        case .real(let value): sqlite3_bind_double(statement, index, value)
+        case .text(let value): bindText(value, to: statement, index: index)
+        case .blob(let data):
+            data.withUnsafeBytes { bytes in
+                _ = sqlite3_bind_blob(statement, index, bytes.baseAddress, Int32(data.count), sqliteTransient)
+            }
+        }
+    }
+
+    private func bindText(_ value: String, to statement: OpaquePointer, index: Int32) {
+        value.withCString { pointer in
+            _ = sqlite3_bind_text(statement, index, pointer, -1, sqliteTransient)
+        }
+    }
+
+    private var sqliteTransient: sqlite3_destructor_type {
+        unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+    }
+
+    private func quotedIdentifier(_ value: String) -> String {
+        "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
+    }
+
+    private func sqliteError(_ database: OpaquePointer, context: String) -> WakeError {
+        WakeError.commandFailed("\(context): \(String(cString: sqlite3_errmsg(database)))")
     }
 
     private func loadFullThreadRecord(threadID: String) throws -> ThreadSQLiteRecord {
@@ -1159,11 +1858,18 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
                sandbox_policy, approval_mode, tokens_used, has_user_event, archived, archived_at,
                git_sha, git_branch, git_origin_url, cli_version, first_user_message,
                agent_nickname, agent_role, memory_mode, model, reasoning_effort, agent_path,
-               created_at_ms, updated_at_ms, thread_source, preview
+               created_at_ms, updated_at_ms, thread_source, preview,
+               recency_at, recency_at_ms, history_mode, name, is_pinned,
+               thread_section_id, section_position, section_entered_at_ms
         from threads
         where id = '\(sql(threadID))';
         """
-        let database = try openReadOnlyImmutable(stateDB)
+        let database: OpaquePointer
+        do {
+            database = try openReadOnly(stateDB)
+        } catch {
+            database = try openReadOnlyImmutable(stateDB)
+        }
         defer { sqlite3_close(database) }
 
         var statement: OpaquePointer?
@@ -1208,7 +1914,15 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
             createdAtMs: int64(statement, 25),
             updatedAtMs: int64(statement, 26),
             threadSource: nullableText(statement, 27),
-            preview: text(statement, 28)
+            preview: text(statement, 28),
+            recencyAt: int64(statement, 29),
+            recencyAtMs: int64(statement, 30),
+            historyMode: nullableText(statement, 31),
+            name: nullableText(statement, 32),
+            isPinned: int64(statement, 33),
+            threadSectionID: nullableText(statement, 34),
+            sectionPosition: int64(statement, 35),
+            sectionEnteredAtMs: int64(statement, 36)
         )
     }
 
@@ -1227,7 +1941,9 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
             sandbox_policy, approval_mode, tokens_used, has_user_event, archived, archived_at,
             git_sha, git_branch, git_origin_url, cli_version, first_user_message,
             agent_nickname, agent_role, memory_mode, model, reasoning_effort, agent_path,
-            created_at_ms, updated_at_ms, thread_source, preview
+            created_at_ms, updated_at_ms, thread_source, preview,
+            recency_at, recency_at_ms, history_mode, name, is_pinned,
+            thread_section_id, section_position, section_entered_at_ms
         ) values (
             \(sqlValue(record.id)),
             \(sqlValue(record.rolloutPath)),
@@ -1257,7 +1973,15 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
             \(sqlValue(record.createdAtMs)),
             \(sqlValue(record.updatedAtMs)),
             \(sqlValue(record.threadSource)),
-            \(sqlValue(record.preview))
+            \(sqlValue(record.preview)),
+            \(sqlValue(record.recencyAt)),
+            \(sqlValue(record.recencyAtMs)),
+            \(sqlValue(record.historyMode)),
+            \(sqlValue(record.name)),
+            \(sqlValue(record.isPinned)),
+            \(sqlValue(record.threadSectionID)),
+            \(sqlValue(record.sectionPosition)),
+            \(sqlValue(record.sectionEnteredAtMs))
         );
         """
         _ = try Shell.run("/usr/bin/sqlite3", [stateDB.path, statementSQL])
@@ -1408,24 +2132,6 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         var result = [firstLine]
         result.append(contentsOf: lines.dropFirst())
         return result.joined(separator: "\n") + "\n"
-    }
-
-    private func updateSessionMetaProject(path: URL, cwd: String) throws {
-        let text = try String(contentsOf: path, encoding: .utf8)
-        let parts = text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
-        guard let first = parts.first,
-              let data = String(first).data(using: .utf8),
-              var obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { throw WakeError.invalidJSON("Cannot decode first JSONL line") }
-
-        var payload = obj["payload"] as? [String: Any] ?? [:]
-        payload["cwd"] = cwd
-        obj["payload"] = payload
-
-        let encoded = try JSONSerialization.data(withJSONObject: obj, options: [])
-        let firstLine = String(data: encoded, encoding: .utf8) ?? String(first)
-        let rest = parts.count > 1 ? String(parts[1]) : ""
-        try (firstLine + "\n" + rest).write(to: path, atomically: true, encoding: .utf8)
     }
 
     private func insertBranchedSQLiteRow(
@@ -1590,6 +2296,12 @@ private struct ThreadRow: Decodable {
     let updated_at_ms: Int64?
 }
 
+private struct ThreadSpawnEdgeRecord: Codable {
+    let parentThreadID: String
+    let childThreadID: String
+    let status: String
+}
+
 private struct SessionIndexEntry: Codable {
     let id: String
     let thread_name: String?
@@ -1606,6 +2318,10 @@ private struct TrashedThreadManifest: Codable {
     let trashedAt: String
     let sqliteRecord: ThreadSQLiteRecord
     let sessionIndexEntry: SessionIndexEntry?
+    let spawnEdges: [ThreadSpawnEdgeRecord]?
+    let dynamicTools: [ThreadDynamicToolRecord]?
+    let projectState: ThreadProjectState?
+    let externalDatabases: [SQLiteDatabaseSnapshot]?
 }
 
 private struct ThreadSQLiteRecord: Codable {
@@ -1638,4 +2354,50 @@ private struct ThreadSQLiteRecord: Codable {
     let updatedAtMs: Int64?
     let threadSource: String?
     let preview: String
+    let recencyAt: Int64?
+    let recencyAtMs: Int64?
+    let historyMode: String?
+    let name: String?
+    let isPinned: Int64?
+    let threadSectionID: String?
+    let sectionPosition: Int64?
+    let sectionEnteredAtMs: Int64?
+}
+
+private struct ThreadDynamicToolRecord: Codable {
+    let threadID: String
+    let position: Int64
+    let name: String
+    let description: String
+    let inputSchema: String
+    let deferLoading: Int64
+    let namespace: String?
+}
+
+private struct ThreadProjectState: Codable {
+    let projectID: String?
+    let sidebarProjectID: String?
+    let sidebarPosition: Int?
+    let wasProjectless: Bool
+    let workspaceRootHint: String?
+    let outputDirectory: String?
+}
+
+private struct SQLiteDatabaseSnapshot: Codable {
+    let relativePath: String
+    let rows: [SQLiteRowSnapshot]
+}
+
+private struct SQLiteRowSnapshot: Codable {
+    let table: String
+    let columns: [String]
+    let values: [SQLiteStoredValue]
+}
+
+private enum SQLiteStoredValue: Codable {
+    case null
+    case integer(Int64)
+    case real(Double)
+    case text(String)
+    case blob(Data)
 }

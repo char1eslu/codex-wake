@@ -45,6 +45,11 @@ let package = Package(
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]
+        ),
+        .executableTarget(
+            name: "CodexKeeperCompatibilityTests",
+            dependencies: ["CodexKeeperCore"],
+            path: "Tests/CodexKeeperCoreTests"
         )
     ]
 )

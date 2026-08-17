@@ -2,6 +2,14 @@
 
 All notable changes to Codex Keeper, formerly Codex Wake, are documented here.
 
+## 0.2.1 - 2026-08-17
+
+- Updated chat discovery for Codex Desktop 26.810 and hide subagent threads from the user-facing chat list while retaining their count on the parent chat.
+- Prevented subagent threads from being repaired, moved, or deleted independently from their parent.
+- Fixed project moves by synchronizing `threads.cwd`, rollout `session_meta.payload.cwd`, native project assignments, and sidebar ordering.
+- Updated Trash and restore for current thread columns, spawn edges, dynamic tools, native project state, catalog rows, and history snapshots.
+- Added atomic rollback paths, consistent SQLite snapshots, and isolated current-schema compatibility tests.
+
 ## 0.2.0 - 2026-06-12
 
 - Renamed the app from **Codex Wake** to **Codex Keeper**.

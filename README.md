@@ -16,6 +16,7 @@ This fork keeps the app as a dense **Liquid Glass** desktop utility while pullin
 - Liquid Glass three-pane UI for projects, chats, and detail preview.
 - Compact search field with an inline icon-only **Deep Search** action.
 - Multi-select chat actions with shift/command selection, context menus, keyboard navigation, and batch repair/move/trash.
+- Codex subagent threads are folded into their parent chat instead of appearing as independent chats or repair candidates.
 - `Not indexed` session state when a chat exists in `~/.codex/sqlite/state_5.sqlite` but is missing from `session_index.jsonl`.
 - **Repair Index** adds missing `session_index.jsonl` entries for chats that need metadata repair.
 - Safe **Move to Trash** support for chats, including selected chats.
@@ -37,8 +38,8 @@ This fork keeps the app as a dense **Liquid Glass** desktop utility while pullin
 - Run deep search inside JSONL chat files when metadata search is not enough.
 - Preview chat messages without opening Codex Desktop.
 - Repair missing session-index entries so Codex Desktop can see unindexed chats again.
-- Move chats between known project folders by updating local metadata.
-- Move chats to Codex Keeper Trash by removing Codex metadata and moving the JSONL file into app trash when it exists.
+- Move chats between known project folders by updating SQLite, rollout metadata, and Codex Desktop's native project/sidebar assignments together.
+- Move chats to Codex Keeper Trash by removing current Codex metadata and moving the JSONL file into app trash when it exists; restore reinstates project, spawn-edge, dynamic-tool, catalog, and history-snapshot records.
 - Trim a chat from a selected user message, with a backup created first.
 - Branch a new chat from an earlier Codex turn without changing the original.
 - Reveal chat JSONL files in Finder or copy their paths.
@@ -62,6 +63,9 @@ Codex Keeper reads local Codex Desktop files:
 
 ```text
 ~/.codex/sqlite/state_5.sqlite
+~/.codex/sqlite/codex-dev.db
+~/.codex/sqlite/codex-history-snapshots-dev.db
+~/.codex/.codex-global-state.json
 ~/.codex/session_index.jsonl
 ~/.codex/sessions/**/*.jsonl
 ```
@@ -164,6 +168,12 @@ Build the executable:
 swift build
 ```
 
+Run the isolated current-schema compatibility suite:
+
+```sh
+swift run CodexKeeperCompatibilityTests
+```
+
 Build only the CLI:
 
 ```sh
@@ -224,7 +234,7 @@ If something looks wrong after an operation, restore the relevant backup from th
 
 ## Status
 
-Early local utility. Tested against local Codex Desktop data, but Codex storage is private and can change.
+Early local utility. Compatibility-tested with Codex Desktop 26.810 storage and isolated fixtures, but Codex storage is private and can change.
 
 ## Disclaimer
 

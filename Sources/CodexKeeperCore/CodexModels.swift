@@ -9,6 +9,9 @@ package struct CodexThread: Identifiable, Hashable {
     package let updatedAtMs: Date?
     package let source: String
     package let threadSource: String
+    package let parentThreadID: String?
+    package let spawnStatus: String?
+    package let childThreadCount: Int
     package let hasUserEvent: Bool
     package let archived: Bool
     package let title: String
@@ -41,9 +44,18 @@ package struct CodexThread: Identifiable, Hashable {
         ProjectSummary.projectID(for: cwd)
     }
 
+    package var isSubagent: Bool {
+        threadSource.caseInsensitiveCompare("subagent") == .orderedSame || parentThreadID != nil
+    }
+
+    package var isUserFacing: Bool {
+        !isSubagent
+    }
+
     package var needsRepair: Bool {
         if archived { return false }
         if !fileExists { return false }
+        if isSubagent || !hasUserEvent { return false }
         return !isInSessionIndex
     }
 
@@ -54,6 +66,7 @@ package struct CodexThread: Identifiable, Hashable {
     package var statusLabel: String {
         if archived { return "Archived" }
         if !fileExists { return "Missing file" }
+        if isSubagent { return "Subagent" }
         if !isInSessionIndex { return "Not indexed" }
         return "Available"
     }
@@ -86,6 +99,24 @@ package struct ProjectSummary: Identifiable, Hashable {
     package let repairCount: Int
     package let availableCount: Int
     package let latestUpdatedAt: Date?
+
+    package init(
+        id: String,
+        name: String,
+        path: String,
+        totalCount: Int,
+        repairCount: Int,
+        availableCount: Int,
+        latestUpdatedAt: Date?
+    ) {
+        self.id = id
+        self.name = name
+        self.path = path
+        self.totalCount = totalCount
+        self.repairCount = repairCount
+        self.availableCount = availableCount
+        self.latestUpdatedAt = latestUpdatedAt
+    }
 
     package var systemImage: String {
         switch id {

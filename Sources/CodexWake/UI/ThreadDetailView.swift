@@ -87,6 +87,9 @@ struct ThreadDetailView: View {
             row("Session index", WakeDates.display(thread.sessionIndexUpdatedAt))
             row("Session meta", WakeDates.display(thread.sessionMetaTimestamp))
             row("Thread source", thread.threadSource.isEmpty ? "NULL" : thread.threadSource)
+            if thread.childThreadCount > 0 {
+                row("Subagents", String(thread.childThreadCount))
+            }
             row("Archived", thread.archived ? "yes" : "no")
             row("File exists", thread.fileExists ? "yes" : "no")
         }
