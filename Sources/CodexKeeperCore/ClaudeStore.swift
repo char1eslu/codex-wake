@@ -223,6 +223,44 @@ package final class ClaudeStore: ThreadStore, @unchecked Sendable {
 
     // MARK: - Move between projects
 
+    /// Sessions currently open in a running Claude Code/Desktop client, keyed
+    /// by session ID. A live client keeps appending to the original JSONL path
+    /// and will recreate a moved file, so moves must be refused for them.
+    private func liveSessionIDs() throws -> [String: Int32] {
+        let sessionsDirectory = claudeHome.appendingPathComponent("sessions", isDirectory: true)
+        guard let files = try? fileManager.contentsOfDirectory(
+            at: sessionsDirectory,
+            includingPropertiesForKeys: nil,
+            options: []
+        ) else { return [:] }
+
+        var live: [String: Int32] = [:]
+        for file in files where file.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: file),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let sessionID = obj["sessionId"] as? String
+            else { continue }
+            let pid = obj["pid"] as? Int32 ?? 0
+            if pid != 0, Self.processExists(pid) {
+                live[sessionID] = pid
+            }
+        }
+        return live
+    }
+
+    private static func processExists(_ pid: Int32) -> Bool {
+        kill(pid, 0) == 0 || errno == EPERM
+    }
+
+    private func throwIfLive(_ thread: CodexThread) throws {
+        let live = try liveSessionIDs()
+        if let pid = live[thread.id] {
+            throw WakeError.commandFailed(
+                "This session is currently open in Claude (pid \(pid)). Quit that conversation first, then move it."
+            )
+        }
+    }
+
     package func move(thread: CodexThread, to project: ProjectSummary) throws -> MoveReport {
         guard !project.path.isEmpty else {
             throw WakeError.commandFailed("Cannot move to All Projects")
@@ -230,6 +268,7 @@ package final class ClaudeStore: ThreadStore, @unchecked Sendable {
         guard fileManager.fileExists(atPath: thread.rolloutPath) else {
             throw WakeError.missingThreadFile(thread.rolloutPath)
         }
+        try throwIfLive(thread)
 
         let stamp = Self.backupStamp()
         let backupSuffix = "\(stamp)-move"
@@ -298,6 +337,7 @@ package final class ClaudeStore: ThreadStore, @unchecked Sendable {
     // MARK: - Trash
 
     package func moveThreadToTrash(_ thread: CodexThread) throws -> TrashThreadReport {
+        try throwIfLive(thread)
         let rolloutURL = thread.rolloutURL.standardizedFileURL
         guard rolloutURL.path.hasPrefix(projectsRoot.standardizedFileURL.path + "/") else {
             throw WakeError.commandFailed("Refusing to trash a chat file outside ~/.claude/projects.")
