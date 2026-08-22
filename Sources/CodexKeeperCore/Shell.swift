@@ -32,6 +32,7 @@ package enum WakeError: LocalizedError {
     case missingStateDatabase(URL)
     case invalidJSON(String)
     case missingThreadFile(String)
+    case unsupportedByClaudeStore(String)
 
     package var errorDescription: String? {
         switch self {
@@ -45,6 +46,8 @@ package enum WakeError: LocalizedError {
             return "Invalid JSON: \(message)"
         case .missingThreadFile(let path):
             return "Thread file not found: \(path)"
+        case .unsupportedByClaudeStore(let operation):
+            return "\(operation) is not supported for Claude sessions."
         }
     }
 }

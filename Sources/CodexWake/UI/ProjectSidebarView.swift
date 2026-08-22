@@ -30,6 +30,27 @@ struct ProjectSidebarView: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
+
+            HStack(spacing: 8) {
+                ForEach(SessionBackend.allCases) { backend in
+                    Button {
+                        model.backend = backend
+                    } label: {
+                        Label(backend.label, systemImage: backend.systemImage)
+                            .font(.caption.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .liquidGlassButtonStyle()
+                    .opacity(model.backend == backend ? 1 : 0.55)
+                    .background(
+                        model.backend == backend ? Color.accentColor.opacity(0.35) : Color.clear,
+                        in: RoundedRectangle.compactLiquidGlass
+                    )
+                    .help("Show \(backend.label) sessions")
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 12)
             .liquidGlassContainer(spacing: 8)
 
             Divider()

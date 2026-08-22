@@ -3,6 +3,27 @@ import AppKit
 import CodexKeeperCore
 import SwiftUI
 
+enum SessionBackend: String, CaseIterable, Identifiable {
+    case codex
+    case claude
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .codex: return "Codex"
+        case .claude: return "Claude"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .codex: return "terminal"
+        case .claude: return "sparkles"
+        }
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var isLoading = false
@@ -31,10 +52,18 @@ final class AppModel: ObservableObject {
     @Published private(set) var isPreviewLoading = false
     @Published var operationReport: OperationReport?
     @Published private(set) var isDemoMode: Bool
+    @Published var backend: SessionBackend = .codex {
+        didSet {
+            guard oldValue != backend else { return }
+            switchBackend()
+        }
+    }
     @Published private(set) var isInstallingCommandLineTool = false
     @Published private(set) var isUninstallingCommandLineTool = false
 
-    private let store: any ThreadStore
+    private let codexStore = CodexStore()
+    private let claudeStore = ClaudeStore()
+    private var store: any ThreadStore
     private var deepSearchTask: Task<Void, Never>?
     private var previewTask: Task<Void, Never>?
     private var previewDebounceTask: Task<Void, Never>?
@@ -128,7 +157,27 @@ final class AppModel: ObservableObject {
 
     init(demoMode: Bool = AppModel.detectDemoMode(), store: (any ThreadStore)? = nil) {
         self.isDemoMode = demoMode
-        self.store = store ?? (demoMode ? DemoCodexStore() : CodexStore())
+        self.store = store ?? (demoMode ? DemoCodexStore() : codexStore)
+        Task { [weak self] in await self?.refresh() }
+    }
+
+    private func switchBackend() {
+        deepSearchTask?.cancel()
+        previewTask?.cancel()
+        previewDebounceTask?.cancel()
+        previewCache.removeAll()
+        previewCacheOrder.removeAll()
+        searchText = ""
+        operationReport = nil
+        preview = nil
+        selectedThreadIDs = []
+        selectedThreadID = nil
+        selectedProjectID = ProjectSummary.allID
+        threads = []
+        filteredThreads = []
+        projects = [.all]
+        store = isDemoMode ? DemoCodexStore() : (backend == .codex ? codexStore as any ThreadStore : claudeStore)
+        status = "Switched to \(backend.label) sessions"
         Task { [weak self] in await self?.refresh() }
     }
 
@@ -140,7 +189,8 @@ final class AppModel: ObservableObject {
 
     func refresh() async {
         isLoading = true
-        status = isDemoMode ? "Loading demo chats..." : "Scanning ~/.codex..."
+        let homeLabel = isDemoMode ? "demo" : (backend == .codex ? "~/.codex" : "~/.claude")
+        status = "Scanning \(homeLabel)..."
         errorMessage = nil
         defer { isLoading = false }
 
