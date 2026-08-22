@@ -132,8 +132,12 @@ package final class ClaudeStore: ThreadStore, @unchecked Sendable {
         "/" + encodedDirName
     }
 
+    // Claude Code names project directories by replacing every character
+    // outside [A-Za-z0-9] with "-", e.g. "/Users/a_b/My Folder" becomes
+    // "-Users-a-b-My-Folder". Matching that exactly is required or Claude
+    // Code will not discover the moved session.
     static func encodedProjectDirectoryName(for path: String) -> String {
-        path.replacingOccurrences(of: "/", with: "-")
+        String(path.map { ($0.isASCII && ($0.isLetter || $0.isNumber)) ? $0 : "-" })
     }
 
     // MARK: - Preview
