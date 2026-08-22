@@ -2,11 +2,25 @@
 
 Codex Keeper is the new name for Codex Wake. The GitHub repository is still named `codex-wake` during the transition so existing links, releases, and local checkouts continue to work.
 
-Codex Keeper is a local macOS app for finding, previewing, repairing, moving, trimming, branching, trashing, restoring, and backing up Codex Desktop chat sessions.
+Codex Keeper is a local macOS app for finding, previewing, repairing, moving, trimming, branching, trashing, restoring, and backing up Codex Desktop chat sessions — and now **Claude Code / Claude Desktop sessions** too.
 
 This fork keeps the app as a dense **Liquid Glass** desktop utility while pulling in the newer session-management features from upstream.
 
 ![Codex Keeper screenshot](assets/screenshot.png)
+
+## Claude Session Support
+
+Use the **Codex ⌘ / Claude ✦** toggle at the top of the sidebar to switch between Codex and Claude sources. Both backends share the same three-pane UI.
+
+For Claude sessions (`~/.claude/projects/**/*.jsonl`), Codex Keeper supports:
+
+- Browse sessions grouped by project, search by title/preview/path, and full-chat preview (thinking blocks shown as `[thinking]`, tool calls as `[tool: name]`; subagent sidechains are hidden).
+- Titles come from the session's `custom-title` line, falling back to the first user message.
+- **Move between projects**: rewrites every `cwd` field inside the JSONL, relocates the file to the target project directory using Claude's exact directory encoding (every non-alphanumeric character becomes `-`), and syncs Claude Desktop's own session index (`~/Library/Application Support/Claude-3p/claude-code-sessions/*/local_*.json`) so the chat shows up in the Desktop sidebar under the new project.
+- **Trash / restore** with per-session manifests under `~/.claude/.claude-keeper-trash`, plus a separate backup trail marked `.claude-rescue-backup-`.
+- Live-session protection: sessions currently open in a running Claude Code/Desktop client are detected via `~/.claude/sessions/*.json` and refused for move/trash, because the running client would recreate the file at its old path.
+- Sessions that only exist as CLI files (no Desktop index entry) get a new index entry created on move, titled from the chat content.
+- Repair Index / Trim / Branch are Codex-only operations and are disabled for Claude sessions.
 
 ## What This Version Adds
 
@@ -68,6 +82,14 @@ Codex Keeper reads local Codex Desktop files:
 ~/.codex/.codex-global-state.json
 ~/.codex/session_index.jsonl
 ~/.codex/sessions/**/*.jsonl
+```
+
+For Claude sessions it reads and manages:
+
+```text
+~/.claude/projects/**/*.jsonl
+~/.claude/sessions/*.json                  (live-session detection)
+~/Library/Application Support/Claude-3p/claude-code-sessions/  (Desktop sidebar index)
 ```
 
 The app has no server component and does not send chat content anywhere.
