@@ -297,6 +297,16 @@ package final class ClaudeStore: ThreadStore, @unchecked Sendable {
             throw error
         }
 
+        // Claude Desktop lists sessions from its own index
+        // (claude-code-sessions/*/local_*.json keyed by cliSessionId), not by
+        // scanning ~/.claude/projects, so the entry must be updated too or the
+        // session disappears from the Desktop sidebar.
+        changed += try syncDesktopIndexEntry(
+            threadID: thread.id,
+            newCWD: project.path,
+            sessionFile: destination
+        )
+
         return MoveReport(
             threadID: thread.id,
             fromProject: thread.cwd,
@@ -332,6 +342,164 @@ package final class ClaudeStore: ThreadStore, @unchecked Sendable {
             outputLines.append(rewrittenLine)
         }
         return Data(outputLines.joined(separator: "\n").appending("\n").utf8)
+    }
+
+    // MARK: - Claude Desktop index sync
+
+    private var desktopSessionsRoot: URL? {
+        let root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+        let candidates = ["Claude-3p/claude-code-sessions", "Claude/claude-code-sessions"]
+        for candidate in candidates {
+            let url = root.appendingPathComponent(candidate, isDirectory: true)
+            if fileManager.fileExists(atPath: url.path) { return url }
+        }
+        return nil
+    }
+
+    func syncDesktopIndexEntry(threadID: String, newCWD: String, sessionFile: URL) throws -> [String] {
+        guard let root = desktopSessionsRoot else { return [] }
+        var entries = try allDesktopIndexEntries(under: root)
+        var changed: [String] = []
+        let title = Self.sessionTitle(from: sessionFile) ?? threadID
+
+        if let existing = entries.first(where: { $0.cliSessionID == threadID }) {
+            let url = existing.url
+            var obj = existing.object
+            obj["cwd"] = newCWD
+            obj["originCwd"] = newCWD
+            obj["title"] = title
+            obj["isArchived"] = false
+            let stamp = Self.backupStamp()
+            let backupURL = url.appendingPathExtension("\(stamp).claude-rescue-backup-\(stamp)")
+            try fileManager.copyItem(at: url, to: backupURL)
+            let data = try JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
+            try writeDataAtomically(data, to: url)
+            changed.append(url.path)
+            return changed
+        }
+
+        // No entry yet (e.g. a CLI-only session): create one so Desktop can
+        // see it. Reuse an existing entry as a field template.
+        let templateObject: [String: Any]
+        if let anyEntry = entries.first?.object {
+            templateObject = anyEntry
+        } else {
+            templateObject = [
+                "isArchived": false,
+                "titleSource": "auto",
+                "permissionMode": "default",
+                "completedTurns": 0,
+            ]
+        }
+        guard let workspaceDir = entries.first?.url.deletingLastPathComponent()
+            ?? firstWorkspaceSessionDir(in: root)
+        else {
+            throw WakeError.commandFailed("Claude Desktop has no session index to register this chat in. Open the target project once in Claude Desktop, then move again.")
+        }
+
+        var obj = templateObject
+        let localID = "local_" + UUID().uuidString
+        obj["sessionId"] = localID
+        obj["cliSessionId"] = threadID
+        obj["cwd"] = newCWD
+        obj["originCwd"] = newCWD
+        obj["title"] = title
+        obj["isArchived"] = false
+        let createdAt = Int64(Date().timeIntervalSince1970 * 1000)
+        obj["createdAt"] = createdAt
+        obj["lastActivityAt"] = createdAt
+
+        let url = workspaceDir.appendingPathComponent(localID + ".json")
+        let data = try JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
+        try writeDataAtomically(data, to: url)
+        changed.append(url.path)
+        return changed
+    }
+
+    private struct DesktopIndexEntry {
+        let url: URL
+        let object: [String: Any]
+        var cliSessionID: String? { object["cliSessionId"] as? String }
+    }
+
+    private func allDesktopIndexEntries(under root: URL) throws -> [DesktopIndexEntry] {
+        let keys: [URLResourceKey] = [.isRegularFileKey]
+        guard let enumerator = fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: keys,
+            options: [.skipsPackageDescendants]
+        ) else { return [] }
+
+        var entries: [DesktopIndexEntry] = []
+        for case let url as URL in enumerator {
+            guard url.lastPathComponent.hasPrefix("local_"), url.pathExtension == "json" else { continue }
+            guard (try? url.resourceValues(forKeys: Set(keys)))?.isRegularFile == true else { continue }
+            guard let data = try? Data(contentsOf: url),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+            entries.append(DesktopIndexEntry(url: url, object: obj))
+        }
+        return entries
+    }
+
+    private func firstWorkspaceSessionDir(in root: URL) -> URL? {
+        guard let workspaces = try? fileManager.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: []
+        ) else { return nil }
+        for workspace in workspaces.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            let subdirs = (try? fileManager.contentsOfDirectory(
+                at: workspace,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: []
+            )) ?? []
+            if let dir = subdirs.first(where: { $0.lastPathComponent.hasPrefix("0000") }) {
+                return dir
+            }
+            return workspace
+        }
+        return nil
+    }
+
+    static func sessionTitle(from url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        var scanned = 0
+        while scanned < 1024 * 1024 {
+            let chunk = handle.readData(ofLength: 128 * 1024)
+            if chunk.isEmpty { break }
+            scanned += chunk.count
+            guard let text = String(data: chunk, encoding: .utf8) else { break }
+            for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+                guard let data = String(line).data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                else { continue }
+                if let custom = obj["customTitle"] as? String, !custom.isEmpty {
+                    return custom
+                }
+                if obj["type"] as? String == "user",
+                   obj["isSidechain"] as? Bool != true,
+                   let message = obj["message"] as? [String: Any] {
+                    switch message["content"] {
+                    case let text as String:
+                        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty { return String(trimmed.prefix(80)) }
+                    case let blocks as [[String: Any]]:
+                        let joined = blocks.compactMap { block -> String? in
+                            guard block["type"] as? String == "text" else { return nil }
+                            return block["text"] as? String
+                        }.joined(separator: " ")
+                        let trimmed = joined.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty { return String(trimmed.prefix(80)) }
+                    default:
+                        break
+                    }
+                }
+            }
+        }
+        return nil
     }
 
     // MARK: - Trash
