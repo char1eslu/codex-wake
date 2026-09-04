@@ -67,7 +67,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         )
     }
 
-    package func loadThreads() throws -> [CodexThread] {
+    package func loadThreads(includeSubagents: Bool) throws -> [CodexThread] {
         guard fileManager.fileExists(atPath: codexHome.path) else { throw WakeError.missingCodexHome(codexHome) }
         guard fileManager.fileExists(atPath: stateDB.path) else { throw WakeError.missingStateDatabase(stateDB) }
         try validateStateDatabase(stateDB)
@@ -75,10 +75,10 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         let index = try loadSessionIndex()
         let rows = try loadThreadRows(from: stateDB)
         let spawnEdges = try loadSpawnEdges(from: stateDB)
-        var childCounts: [String: Int] = [:]
+        var childIDsByParent: [String: [String]] = [:]
         for row in rows {
             if let parent = spawnEdges[row.id]?.parentThreadID ?? parentThreadID(from: row.source) {
-                childCounts[parent, default: 0] += 1
+                childIDsByParent[parent, default: []].append(row.id)
             }
         }
         return rows.map { row in
@@ -96,7 +96,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
                 threadSource: row.thread_source ?? "",
                 parentThreadID: parentThreadID,
                 spawnStatus: edge?.status,
-                childThreadCount: childCounts[row.id] ?? 0,
+                childThreadCount: childIDsByParent[row.id]?.count ?? 0,
                 hasUserEvent: (row.has_user_event ?? 0) != 0,
                 archived: (row.archived ?? 0) != 0,
                 title: metadataText(row.title, maxLength: 240),
@@ -108,11 +108,32 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
                 sessionIndexUpdatedAt: WakeDates.parseISO(indexEntry?.updated_at),
                 sessionMetaTimestamp: nil,
                 sessionPayloadTimestamp: nil,
-                fileExists: fileManager.fileExists(atPath: row.rollout_path)
+                fileExists: fileManager.fileExists(atPath: row.rollout_path),
+                modelProvider: row.model_provider,
+                model: row.model,
+                reasoningEffort: row.reasoning_effort,
+                approvalMode: row.approval_mode,
+                sandboxPolicy: row.sandbox_policy,
+                tokensUsed: row.tokens_used ?? 0,
+                archivedAt: WakeDates.dateFromSeconds(row.archived_at),
+                gitSHA: row.git_sha,
+                gitBranch: row.git_branch,
+                gitOriginURL: row.git_origin_url,
+                agentNickname: row.agent_nickname,
+                agentRole: row.agent_role,
+                agentPath: row.agent_path,
+                recencyAt: dateFromMillisecondsOrSeconds(milliseconds: row.recency_at_ms, seconds: row.recency_at),
+                historyMode: row.history_mode,
+                name: row.name,
+                isPinned: (row.is_pinned ?? 0) != 0,
+                threadSectionID: row.thread_section_id,
+                sectionPosition: row.section_position,
+                sectionEnteredAt: WakeDates.dateFromMilliseconds(row.section_entered_at_ms),
+                childThreadIDs: (childIDsByParent[row.id] ?? []).sorted()
             )
         }
-        .filter(\.isUserFacing)
-        .sorted { $0.updatedAt > $1.updatedAt }
+        .filter { includeSubagents || $0.isUserFacing }
+        .sorted { $0.activityAt > $1.activityAt }
     }
 
     package func loadBackups() throws -> [BackupFile] {
@@ -838,9 +859,14 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
                substr(title, 1, 240) as title,
                substr(first_user_message, 1, 500) as first_user_message,
                substr(preview, 1, 500) as preview,
-               cwd, created_at_ms, updated_at_ms
+               cwd, created_at_ms, updated_at_ms,
+               model_provider, model, reasoning_effort, approval_mode, sandbox_policy,
+               tokens_used, archived_at, git_sha, git_branch, git_origin_url,
+               agent_nickname, agent_role, agent_path, recency_at, recency_at_ms,
+               history_mode, name, is_pinned, thread_section_id, section_position,
+               section_entered_at_ms
         from threads
-        order by updated_at desc;
+        order by coalesce(nullif(recency_at_ms, 0), nullif(updated_at_ms, 0), updated_at * 1000) desc;
         """
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK,
@@ -869,7 +895,28 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
                     preview: nullableText(statement, 10),
                     cwd: text(statement, 11),
                     created_at_ms: int64(statement, 12),
-                    updated_at_ms: int64(statement, 13)
+                    updated_at_ms: int64(statement, 13),
+                    model_provider: text(statement, 14),
+                    model: nullableText(statement, 15),
+                    reasoning_effort: nullableText(statement, 16),
+                    approval_mode: text(statement, 17),
+                    sandbox_policy: text(statement, 18),
+                    tokens_used: int64(statement, 19),
+                    archived_at: int64(statement, 20),
+                    git_sha: nullableText(statement, 21),
+                    git_branch: nullableText(statement, 22),
+                    git_origin_url: nullableText(statement, 23),
+                    agent_nickname: nullableText(statement, 24),
+                    agent_role: nullableText(statement, 25),
+                    agent_path: nullableText(statement, 26),
+                    recency_at: int64(statement, 27),
+                    recency_at_ms: int64(statement, 28),
+                    history_mode: nullableText(statement, 29),
+                    name: nullableText(statement, 30),
+                    is_pinned: int64(statement, 31),
+                    thread_section_id: nullableText(statement, 32),
+                    section_position: int64(statement, 33),
+                    section_entered_at_ms: int64(statement, 34)
                 )
             )
             result = sqlite3_step(statement)
@@ -1032,6 +1079,16 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         return sqlite3_column_int64(statement, index)
     }
 
+    private func dateFromMillisecondsOrSeconds(milliseconds: Int64?, seconds: Int64?) -> Date? {
+        if let milliseconds, milliseconds > 0 {
+            return WakeDates.dateFromMilliseconds(milliseconds)
+        }
+        if let seconds, seconds > 0 {
+            return WakeDates.dateFromSeconds(seconds)
+        }
+        return nil
+    }
+
     private func loadSessionIndex() throws -> [String: SessionIndexEntry] {
         guard fileManager.fileExists(atPath: sessionIndex.path) else { return [:] }
         let text = try String(contentsOf: sessionIndex, encoding: .utf8)
@@ -1154,7 +1211,9 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
             "has_user_event", "archived", "archived_at", "git_sha", "git_branch",
             "git_origin_url", "cli_version", "first_user_message", "agent_nickname",
             "agent_role", "memory_mode", "model", "reasoning_effort", "agent_path",
-            "created_at_ms", "updated_at_ms", "thread_source", "preview"
+            "created_at_ms", "updated_at_ms", "thread_source", "preview", "recency_at",
+            "recency_at_ms", "history_mode", "name", "is_pinned", "thread_section_id",
+            "section_position", "section_entered_at_ms"
         ]
         let missing = requiredColumns.subtracting(columns).sorted()
         guard missing.isEmpty else {
@@ -2294,6 +2353,27 @@ private struct ThreadRow: Decodable {
     let cwd: String
     let created_at_ms: Int64?
     let updated_at_ms: Int64?
+    let model_provider: String
+    let model: String?
+    let reasoning_effort: String?
+    let approval_mode: String
+    let sandbox_policy: String
+    let tokens_used: Int64?
+    let archived_at: Int64?
+    let git_sha: String?
+    let git_branch: String?
+    let git_origin_url: String?
+    let agent_nickname: String?
+    let agent_role: String?
+    let agent_path: String?
+    let recency_at: Int64?
+    let recency_at_ms: Int64?
+    let history_mode: String?
+    let name: String?
+    let is_pinned: Int64?
+    let thread_section_id: String?
+    let section_position: Int64?
+    let section_entered_at_ms: Int64?
 }
 
 private struct ThreadSpawnEdgeRecord: Codable {

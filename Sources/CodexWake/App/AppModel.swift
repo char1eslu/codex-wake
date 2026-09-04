@@ -857,7 +857,7 @@ final class AppModel: ObservableObject {
             }.value
 
             guard !Task.isCancelled, let self else { return }
-            self.filteredThreads = (metadataMatches + rawMatches).sorted { $0.updatedAt > $1.updatedAt }
+            self.filteredThreads = (metadataMatches + rawMatches).sorted { $0.activityAt > $1.activityAt }
             self.selectFirstFilteredThreadIfNeeded()
             self.isDeepSearching = false
             self.status = "Deep search found \(self.filteredThreads.count) chats"

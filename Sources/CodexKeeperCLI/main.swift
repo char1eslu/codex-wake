@@ -94,6 +94,8 @@ struct Chats: ParsableCommand {
         var project: String?
         @Option(name: .long, help: "Maximum number of chats to print.")
         var limit = 20
+        @Flag(name: .long, help: "Include Codex subagent threads in the result.")
+        var includeSubagents = false
         @Flag(name: .long, help: "Print machine-readable JSON.")
         var json = false
 
@@ -104,7 +106,8 @@ struct Chats: ParsableCommand {
                     project: project,
                     query: nil,
                     deep: false,
-                    limit: limit
+                    limit: limit,
+                    includeSubagents: includeSubagents
                 )
                 try printThreads(threads, json: json)
             }
@@ -123,6 +126,8 @@ struct Chats: ParsableCommand {
         var limit = 20
         @Flag(name: .long, help: "Search inside chat JSONL files after metadata matching.")
         var deep = false
+        @Flag(name: .long, help: "Include Codex subagent threads in the result.")
+        var includeSubagents = false
         @Flag(name: .long, help: "Print machine-readable JSON.")
         var json = false
 
@@ -133,7 +138,8 @@ struct Chats: ParsableCommand {
                     project: project,
                     query: query,
                     deep: deep,
-                    limit: limit
+                    limit: limit,
+                    includeSubagents: includeSubagents
                 )
                 try printThreads(threads, json: json)
             }
@@ -148,13 +154,15 @@ struct Chats: ParsableCommand {
         var id: String
         @Option(name: .long, help: "Maximum preview messages to include.")
         var messages = 8
+        @Flag(name: .long, help: "Allow selecting a Codex subagent thread.")
+        var includeSubagents = false
         @Flag(name: .long, help: "Print machine-readable JSON.")
         var json = false
 
         func run() throws {
             try runCLI {
                 let store = storeOptions.makeStore()
-                let thread = try resolveThread(id, in: try store.loadThreads())
+                let thread = try resolveThread(id, in: try store.loadThreads(includeSubagents: includeSubagents))
                 let preview = try? store.loadPreview(for: thread)
                 let payload = ThreadDetailOutput(
                     thread: thread,
@@ -264,10 +272,11 @@ private func filteredThreads(
     project: String?,
     query: String?,
     deep: Bool,
-    limit: Int
+    limit: Int,
+    includeSubagents: Bool
 ) throws -> [CodexThread] {
     let normalizedQuery = query?.trimmingCharacters(in: .whitespacesAndNewlines)
-    let threads = try store.loadThreads()
+    let threads = try store.loadThreads(includeSubagents: includeSubagents)
     var matches = threads.filter { thread in
         guard let project, !project.isEmpty else { return true }
         return matchesProject(thread, project: project)
@@ -361,7 +370,7 @@ private func printThreads(_ threads: [CodexThread], json: Bool) throws {
     }
 
     for row in rows {
-        print("\(row.updatedAt)\t\(row.status)\t\(row.title)\t\(row.id)")
+        print("\(row.recencyAt ?? row.updatedAt)\t\(row.status)\t\(row.title)\t\(row.id)")
     }
 }
 
@@ -373,6 +382,14 @@ private func printThreadDetail(_ payload: ThreadDetailOutput) {
     print("project: \(thread.project)")
     print("cwd: \(thread.cwd)")
     print("path: \(thread.rolloutPath)")
+    print("provider: \(thread.modelProvider)")
+    if let model = thread.model { print("model: \(model)") }
+    if let reasoningEffort = thread.reasoningEffort { print("reasoning effort: \(reasoningEffort)") }
+    print("tokens used: \(thread.tokensUsed)")
+    if let gitBranch = thread.gitBranch { print("git branch: \(gitBranch)") }
+    if let gitSHA = thread.gitSHA { print("git sha: \(gitSHA)") }
+    if let parentThreadID = thread.parentThreadID { print("parent thread: \(parentThreadID)") }
+    if !thread.childThreadIDs.isEmpty { print("child threads: \(thread.childThreadIDs.joined(separator: ", "))") }
     print("updated: \(thread.updatedAt)")
     if let rawError = payload.rawError {
         print("preview warning: \(rawError)")
@@ -488,10 +505,35 @@ private enum DateOutput {
 private struct ThreadOutput: Encodable {
     let id: String
     let title: String
+    let storedTitle: String
     let project: String
     let cwd: String
     let rolloutPath: String
     let status: String
+    let source: String
+    let threadSource: String
+    let parentThreadID: String?
+    let childThreadIDs: [String]
+    let modelProvider: String
+    let model: String?
+    let reasoningEffort: String?
+    let approvalMode: String
+    let sandboxPolicy: String
+    let tokensUsed: Int64
+    let archivedAt: String?
+    let recencyAt: String?
+    let historyMode: String?
+    let name: String?
+    let isPinned: Bool
+    let threadSectionID: String?
+    let sectionPosition: Int64?
+    let sectionEnteredAt: String?
+    let gitSHA: String?
+    let gitBranch: String?
+    let gitOriginURL: String?
+    let agentNickname: String?
+    let agentRole: String?
+    let agentPath: String?
     let createdAt: String
     let updatedAt: String
     let fileExists: Bool
@@ -501,10 +543,35 @@ private struct ThreadOutput: Encodable {
     init(_ thread: CodexThread) {
         id = thread.id
         title = thread.shortTitle
+        storedTitle = thread.title
         project = thread.projectName
         cwd = thread.cwd
         rolloutPath = thread.rolloutPath
         status = thread.statusLabel
+        source = thread.source
+        threadSource = thread.threadSource
+        parentThreadID = thread.parentThreadID
+        childThreadIDs = thread.childThreadIDs
+        modelProvider = thread.modelProvider
+        model = thread.model
+        reasoningEffort = thread.reasoningEffort
+        approvalMode = thread.approvalMode
+        sandboxPolicy = thread.sandboxPolicy
+        tokensUsed = thread.tokensUsed
+        archivedAt = DateOutput.optional(thread.archivedAt)
+        recencyAt = DateOutput.optional(thread.recencyAt)
+        historyMode = thread.historyMode
+        name = thread.name
+        isPinned = thread.isPinned
+        threadSectionID = thread.threadSectionID
+        sectionPosition = thread.sectionPosition
+        sectionEnteredAt = DateOutput.optional(thread.sectionEnteredAt)
+        gitSHA = thread.gitSHA
+        gitBranch = thread.gitBranch
+        gitOriginURL = thread.gitOriginURL
+        agentNickname = thread.agentNickname
+        agentRole = thread.agentRole
+        agentPath = thread.agentPath
         createdAt = DateOutput.string(thread.createdAt)
         updatedAt = DateOutput.string(thread.updatedAt)
         fileExists = thread.fileExists

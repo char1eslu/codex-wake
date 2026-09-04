@@ -391,7 +391,7 @@ private struct ThreadRow: View {
             }
 
             HStack(spacing: 8) {
-                Label(WakeDates.display(thread.updatedAt), systemImage: "clock")
+                Label(WakeDates.display(thread.activityAt), systemImage: "clock")
                 if thread.sessionIndexUpdatedAt == nil {
                     Label("Not indexed", systemImage: "exclamationmark.triangle")
                 }

@@ -6,6 +6,7 @@ private struct CompatibilityTestRunner {
     static func main() throws {
         let suite = CodexStoreCompatibilityTests()
         try suite.testSubagentsAreFoldedIntoParentAndNeverListedForRepair()
+        try suite.testModernThreadMetadataAndSubagentsCanBeProjected()
         try suite.testMoveUpdatesSQLiteRolloutAndNativeProjectMetadata()
         try suite.testTrashAndRestorePreserveCurrentMetadataAndRelations()
         print("Codex Keeper compatibility tests passed")
@@ -22,6 +23,32 @@ struct CodexStoreCompatibilityTests {
         try expect(threads.first?.childThreadCount == 1, "Parent should report one subagent")
         try expect(threads.first?.isSubagent == false, "Parent must not be classified as a subagent")
         try expect(threads.first?.needsRepair == false, "Indexed parent must not need repair")
+    }
+
+    func testModernThreadMetadataAndSubagentsCanBeProjected() throws {
+        let fixture = try CodexFixture()
+        defer { try? fixture.remove() }
+
+        let visible = try fixture.store.loadThreads()
+        let parent = try require(visible.first, "Fixture parent thread is missing")
+        try expect(parent.modelProvider == "openai", "Model provider was not projected")
+        try expect(parent.model == "gpt-test", "Model was not projected")
+        try expect(parent.reasoningEffort == "high", "Reasoning effort was not projected")
+        try expect(parent.approvalMode == "never", "Approval mode was not projected")
+        try expect(parent.sandboxPolicy == "{}", "Sandbox policy was not projected")
+        try expect(parent.tokensUsed == 10, "Token usage was not projected")
+        try expect(parent.activityAt == parent.recencyAt, "Recent activity did not drive thread ordering")
+        try expect(parent.gitBranch == nil, "Unexpected Git branch was projected")
+        try expect(parent.isPinned, "Pinned state was not projected")
+        try expect(parent.threadSectionID == "section-1", "Thread section was not projected")
+        try expect(parent.childThreadIDs == [fixture.childID], "Child thread relationship was not projected")
+
+        let allThreads = try fixture.store.loadThreads(includeSubagents: true)
+        try expect(allThreads.map(\.id).count == 2, "Subagent-inclusive projection should include both threads")
+        let child = try require(allThreads.first(where: { $0.id == fixture.childID }), "Child thread is missing")
+        try expect(child.parentThreadID == fixture.rootID, "Child parent relationship was not projected")
+        try expect(child.agentRole == "research-worker", "Agent role was not projected")
+        try expect(child.agentPath == "/root/scout", "Agent path was not projected")
     }
 
     func testMoveUpdatesSQLiteRolloutAndNativeProjectMetadata() throws {

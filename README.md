@@ -59,6 +59,10 @@ For Claude sessions (`~/.claude/projects/**/*.jsonl`), Codex Keeper supports:
 - Reveal chat JSONL files in Finder or copy their paths.
 - Use the `codex-keeper` CLI for terminal workflows and automation-safe JSON output.
 
+## Compatibility Boundary
+
+Codex Keeper is a local storage and transcript utility. It reads current Codex thread metadata, parent/child relationships, rollout files, and sidebar state, and it can repair or reorganize those files with backups. It does not act as a Codex app-server client: creating/resuming live turns, steering or interrupting a running thread, and server-mediated archive/rename operations remain outside the supported surface.
+
 ## UI Notes
 
 The interface is intentionally work-focused:

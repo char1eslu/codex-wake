@@ -87,8 +87,46 @@ struct ThreadDetailView: View {
             row("Session index", WakeDates.display(thread.sessionIndexUpdatedAt))
             row("Session meta", WakeDates.display(thread.sessionMetaTimestamp))
             row("Thread source", thread.threadSource.isEmpty ? "NULL" : thread.threadSource)
+            if !thread.modelProvider.isEmpty {
+                row("Provider", thread.modelProvider)
+            }
+            if let model = thread.model {
+                row("Model", model)
+            }
+            if let reasoningEffort = thread.reasoningEffort {
+                row("Reasoning", reasoningEffort)
+            }
+            if !thread.approvalMode.isEmpty {
+                row("Approval", thread.approvalMode)
+            }
+            if !thread.sandboxPolicy.isEmpty {
+                row("Sandbox", thread.sandboxPolicy)
+            }
+            row("Tokens used", thread.tokensUsed.formatted())
+            if let archivedAt = thread.archivedAt {
+                row("Archived at", WakeDates.display(archivedAt))
+            }
+            if let recencyAt = thread.recencyAt {
+                row("Recent activity", WakeDates.display(recencyAt))
+            }
+            if let historyMode = thread.historyMode {
+                row("History mode", historyMode)
+            }
+            row("Pinned", thread.isPinned ? "yes" : "no")
+            if let sectionID = thread.threadSectionID {
+                row("Section", sectionID)
+            }
+            if let parentThreadID = thread.parentThreadID {
+                row("Parent thread", parentThreadID)
+            }
             if thread.childThreadCount > 0 {
-                row("Subagents", String(thread.childThreadCount))
+                row("Subagents", thread.childThreadIDs.isEmpty ? String(thread.childThreadCount) : thread.childThreadIDs.joined(separator: ", "))
+            }
+            if let gitBranch = thread.gitBranch {
+                row("Git branch", gitBranch)
+            }
+            if let gitSHA = thread.gitSHA {
+                row("Git SHA", gitSHA)
             }
             row("Archived", thread.archived ? "yes" : "no")
             row("File exists", thread.fileExists ? "yes" : "no")

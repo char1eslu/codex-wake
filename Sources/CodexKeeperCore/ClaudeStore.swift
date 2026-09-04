@@ -21,7 +21,7 @@ package final class ClaudeStore: ThreadStore, @unchecked Sendable {
         nil
     }
 
-    package func loadThreads() throws -> [CodexThread] {
+    package func loadThreads(includeSubagents: Bool) throws -> [CodexThread] {
         guard fileManager.fileExists(atPath: projectsRoot.path) else { return [] }
         let keys: [URLResourceKey] = [.isRegularFileKey, .contentModificationDateKey, .fileSizeKey]
         guard let projectDirs = try? fileManager.contentsOfDirectory(
@@ -45,7 +45,7 @@ package final class ClaudeStore: ThreadStore, @unchecked Sendable {
                 threads.append(thread)
             }
         }
-        return threads.sorted { $0.updatedAt > $1.updatedAt }
+        return threads.sorted { $0.activityAt > $1.activityAt }
     }
 
     private func makeThread(from url: URL) -> CodexThread? {

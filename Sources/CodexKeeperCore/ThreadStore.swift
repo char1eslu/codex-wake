@@ -2,7 +2,7 @@ import Foundation
 
 package protocol ThreadStore: Sendable {
     func loadActiveStateRoot() throws -> ActiveStateRoot?
-    func loadThreads() throws -> [CodexThread]
+    func loadThreads(includeSubagents: Bool) throws -> [CodexThread]
     func loadBackups() throws -> [BackupFile]
     func loadBackupTrash() throws -> [BackupFile]
     func loadThreadTrash() throws -> [TrashedThread]
@@ -19,4 +19,10 @@ package protocol ThreadStore: Sendable {
     func moveBackupToTrash(_ backup: BackupFile) throws
     func emptyBackupTrash() throws -> Int
     func emptyThreadTrash() throws -> Int
+}
+
+package extension ThreadStore {
+    func loadThreads() throws -> [CodexThread] {
+        try loadThreads(includeSubagents: false)
+    }
 }

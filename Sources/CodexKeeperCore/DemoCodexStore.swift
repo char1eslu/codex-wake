@@ -13,11 +13,11 @@ package final class DemoCodexStore: ThreadStore, @unchecked Sendable {
         nil
     }
 
-    package func loadThreads() throws -> [CodexThread] {
+    package func loadThreads(includeSubagents: Bool) throws -> [CodexThread] {
         let trashedThreads = trashedThreadSnapshot()
         return loadAllDemoThreads()
             .filter { !trashedThreads.contains($0.id) }
-            .sorted { $0.updatedAt > $1.updatedAt }
+            .sorted { $0.activityAt > $1.activityAt }
     }
 
     private func loadAllDemoThreads() -> [CodexThread] {

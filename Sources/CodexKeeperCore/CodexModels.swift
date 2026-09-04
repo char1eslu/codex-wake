@@ -24,6 +24,119 @@ package struct CodexThread: Identifiable, Hashable {
     package let sessionMetaTimestamp: Date?
     package let sessionPayloadTimestamp: Date?
     package let fileExists: Bool
+    package let modelProvider: String
+    package let model: String?
+    package let reasoningEffort: String?
+    package let approvalMode: String
+    package let sandboxPolicy: String
+    package let tokensUsed: Int64
+    package let archivedAt: Date?
+    package let gitSHA: String?
+    package let gitBranch: String?
+    package let gitOriginURL: String?
+    package let agentNickname: String?
+    package let agentRole: String?
+    package let agentPath: String?
+    package let recencyAt: Date?
+    package let historyMode: String?
+    package let name: String?
+    package let isPinned: Bool
+    package let threadSectionID: String?
+    package let sectionPosition: Int64?
+    package let sectionEnteredAt: Date?
+    package let childThreadIDs: [String]
+
+    package init(
+        id: String,
+        rolloutPath: String,
+        createdAt: Date,
+        updatedAt: Date,
+        createdAtMs: Date?,
+        updatedAtMs: Date?,
+        source: String,
+        threadSource: String,
+        parentThreadID: String?,
+        spawnStatus: String?,
+        childThreadCount: Int,
+        hasUserEvent: Bool,
+        archived: Bool,
+        title: String,
+        sessionIndexTitle: String,
+        firstUserMessage: String,
+        preview: String,
+        cwd: String,
+        isInSessionIndex: Bool,
+        sessionIndexUpdatedAt: Date?,
+        sessionMetaTimestamp: Date?,
+        sessionPayloadTimestamp: Date?,
+        fileExists: Bool,
+        modelProvider: String = "",
+        model: String? = nil,
+        reasoningEffort: String? = nil,
+        approvalMode: String = "",
+        sandboxPolicy: String = "",
+        tokensUsed: Int64 = 0,
+        archivedAt: Date? = nil,
+        gitSHA: String? = nil,
+        gitBranch: String? = nil,
+        gitOriginURL: String? = nil,
+        agentNickname: String? = nil,
+        agentRole: String? = nil,
+        agentPath: String? = nil,
+        recencyAt: Date? = nil,
+        historyMode: String? = nil,
+        name: String? = nil,
+        isPinned: Bool = false,
+        threadSectionID: String? = nil,
+        sectionPosition: Int64? = nil,
+        sectionEnteredAt: Date? = nil,
+        childThreadIDs: [String] = []
+    ) {
+        self.id = id
+        self.rolloutPath = rolloutPath
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.createdAtMs = createdAtMs
+        self.updatedAtMs = updatedAtMs
+        self.source = source
+        self.threadSource = threadSource
+        self.parentThreadID = parentThreadID
+        self.spawnStatus = spawnStatus
+        self.childThreadCount = childThreadCount
+        self.hasUserEvent = hasUserEvent
+        self.archived = archived
+        self.title = title
+        self.sessionIndexTitle = sessionIndexTitle
+        self.firstUserMessage = firstUserMessage
+        self.preview = preview
+        self.cwd = cwd
+        self.isInSessionIndex = isInSessionIndex
+        self.sessionIndexUpdatedAt = sessionIndexUpdatedAt
+        self.sessionMetaTimestamp = sessionMetaTimestamp
+        self.sessionPayloadTimestamp = sessionPayloadTimestamp
+        self.fileExists = fileExists
+        self.modelProvider = modelProvider
+        self.model = model
+        self.reasoningEffort = reasoningEffort
+        self.approvalMode = approvalMode
+        self.sandboxPolicy = sandboxPolicy
+        self.tokensUsed = tokensUsed
+        self.archivedAt = archivedAt
+        self.gitSHA = gitSHA
+        self.gitBranch = gitBranch
+        self.gitOriginURL = gitOriginURL
+        self.agentNickname = agentNickname
+        self.agentRole = agentRole
+        self.agentPath = agentPath
+        self.recencyAt = recencyAt
+        self.historyMode = historyMode
+        self.name = name
+        self.isPinned = isPinned
+        self.threadSectionID = threadSectionID
+        self.sectionPosition = sectionPosition
+        self.sectionEnteredAt = sectionEnteredAt
+        self.childThreadIDs = childThreadIDs
+    }
 
     package var rolloutURL: URL { URL(fileURLWithPath: rolloutPath) }
     package var shortTitle: String {
@@ -69,6 +182,10 @@ package struct CodexThread: Identifiable, Hashable {
         if isSubagent { return "Subagent" }
         if !isInSessionIndex { return "Not indexed" }
         return "Available"
+    }
+
+    package var activityAt: Date {
+        recencyAt ?? updatedAt
     }
 
     package func matchesMetadata(_ query: String) -> Bool {
@@ -158,7 +275,7 @@ package struct ProjectSummary: Identifiable, Hashable {
                 totalCount: items.count,
                 repairCount: items.filter(\.needsRepair).count,
                 availableCount: items.filter(\.isAvailable).count,
-                latestUpdatedAt: items.map(\.updatedAt).max()
+                latestUpdatedAt: items.map(\.activityAt).max()
             )
         }
         let pinnedChats = projects.filter { $0.id == chatsID }
@@ -183,7 +300,7 @@ package struct ProjectSummary: Identifiable, Hashable {
             totalCount: threads.count,
             repairCount: threads.filter(\.needsRepair).count,
             availableCount: threads.filter(\.isAvailable).count,
-            latestUpdatedAt: threads.map(\.updatedAt).max()
+            latestUpdatedAt: threads.map(\.activityAt).max()
         )
         return pinnedChats + [all] + regularProjects
     }
