@@ -31,13 +31,16 @@ For Claude sessions (`~/.claude/projects/**/*.jsonl`), Codex Keeper supports:
 - Compact search field with an inline icon-only **Deep Search** action.
 - Multi-select chat actions with shift/command selection, context menus, keyboard navigation, and batch repair/move/trash.
 - Codex subagent threads are folded into their parent chat instead of appearing as independent chats or repair candidates.
-- `Not indexed` session state when a chat exists in `~/.codex/sqlite/state_5.sqlite` but is missing from `session_index.jsonl`.
+- `Not indexed` session state when a chat exists in the Codex state database but is missing from `session_index.jsonl`.
+- The state database is discovered by version and schema, so a Codex release that bumps `state_<N>.sqlite` no longer breaks discovery.
+- Trash and Restore cover every sibling database and every state-database table that references a chat, including `thread_history_<N>.sqlite` transcripts and `thread_attachments`.
+- Chats currently open in Codex Desktop are detected through `thread-writer-locks/*.lock` and refused for move/trash.
 - **Repair Index** adds missing `session_index.jsonl` entries for chats that need metadata repair.
 - Safe **Move to Trash** support for chats, including selected chats.
 - Backup Manager **Trash** tab with trashed chat restore and permanent delete actions.
 - Full-chat preview with turn-aware **Trim from here** and **Branch from here** controls.
 - Backup Manager with chat-backup restore, move-to-trash, and empty-trash actions.
-- Bundled `codex-keeper` CLI with `doctor`, chat/project/backup inspection, JSON output, and wake dry-runs.
+- Bundled `codex-keeper` CLI with `doctor`, chat/project/backup inspection, JSON output, wake dry-runs, and a `--claude` source switch.
 - App menu actions for installing or uninstalling the bundled CLI without changing the app itself.
 - Refresh no longer blocks on backup scans or preview parsing, reducing stuck global spinner cases.
 - SwiftPM macOS run workflow with `script/build_and_run.sh` and a Codex Run action.
@@ -53,7 +56,7 @@ For Claude sessions (`~/.claude/projects/**/*.jsonl`), Codex Keeper supports:
 - Preview chat messages without opening Codex Desktop.
 - Repair missing session-index entries so Codex Desktop can see unindexed chats again.
 - Move chats between known project folders by updating SQLite, rollout metadata, and Codex Desktop's native project/sidebar assignments together.
-- Move chats to Codex Keeper Trash by removing current Codex metadata and moving the JSONL file into app trash when it exists; restore reinstates project, spawn-edge, dynamic-tool, catalog, and history-snapshot records.
+- Move chats to Codex Keeper Trash by removing current Codex metadata and moving the JSONL file into app trash when it exists; restore reinstates the thread row, attachments, spawn edges, dynamic tools, catalog, transcript, and history-snapshot records.
 - Trim a chat from a selected user message, with a backup created first.
 - Branch a new chat from an earlier Codex turn without changing the original.
 - Reveal chat JSONL files in Finder or copy their paths.
@@ -80,13 +83,20 @@ The interface is intentionally work-focused:
 Codex Keeper reads local Codex Desktop files:
 
 ```text
-~/.codex/sqlite/state_5.sqlite
-~/.codex/sqlite/codex-dev.db
-~/.codex/sqlite/codex-history-snapshots-dev.db
+~/.codex/sqlite/state_<N>.sqlite            (highest version that has a threads table)
+~/.codex/sqlite/*.sqlite, ~/.codex/sqlite/*.db, ~/.codex/*.sqlite, ~/.codex/*.db
 ~/.codex/.codex-global-state.json
 ~/.codex/session_index.jsonl
 ~/.codex/sessions/**/*.jsonl
+~/.codex/thread-writer-locks/*.lock         (live-session detection)
 ```
+
+The state database and the sibling databases are **discovered, not hardcoded**. Codex bumps
+`state_<N>.sqlite` as its schema evolves and moves chat history between files
+(`codex-history-snapshots-dev.db` → `thread_history_<N>.sqlite`), so Codex Keeper picks the
+highest-version database that actually contains a `threads` table and scans every sibling
+database for rows that reference a chat. Trash and Restore use that same discovery, so a chat's
+transcript and attachments are removed and reinstated together.
 
 For Claude sessions it reads and manages:
 
@@ -108,6 +118,8 @@ When you repair a selected not-indexed chat, Codex Keeper creates backups and up
 - the first `session_meta` JSONL line: `timestamp` and `payload.timestamp`
 
 If the chat is missing from `session_index.jsonl`, Codex Keeper appends a new index line using the existing chat title. The chat messages themselves are not changed by repair.
+
+Repair applies to chats that actually have conversation content — a stored first user message or preview — rather than to any row whose `has_user_event` flag happens to be set. Older Codex builds wrote `has_user_event = 0` for chats that do contain messages, so gating on that flag alone made Repair Index a no-op. Subagent chats are still excluded, because they follow their parent chat.
 
 Backups are written next to the original files with `.codex-rescue-backup-<timestamp>` suffixes.
 
@@ -180,6 +192,20 @@ Run the actual repair/wake operation only after reviewing the dry-run output:
 ```sh
 codex-keeper chats wake <thread-id-or-prefix>
 ```
+
+Every command also accepts a source override, so the CLI can inspect Claude sessions or a
+Codex home other than `~/.codex`:
+
+```sh
+codex-keeper doctor --claude
+codex-keeper chats list --claude --limit 20
+codex-keeper projects list --claude --json
+codex-keeper doctor --codex-home /path/to/other/.codex
+```
+
+`--claude` (or `--claude-home <path>`) switches the whole command to Claude Code / Claude
+Desktop sessions. **Repair Index is Codex-only**, so `chats wake --claude` is refused with an
+explanatory error instead of silently doing nothing.
 
 ## Build And Run
 

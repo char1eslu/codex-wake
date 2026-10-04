@@ -2,6 +2,27 @@
 
 All notable changes to Codex Keeper, formerly Codex Wake, are documented here.
 
+## Unreleased
+
+### Fixed
+
+- **State database discovery is no longer hardcoded to `state_5.sqlite`.** Codex Keeper now picks the highest-version database in `~/.codex/sqlite/` (and `~/.codex`) that actually contains a `threads` table, falling back to the newest candidate. A Codex release that bumps the file name previously made the whole app report "state database not found".
+- **Repair Index works again for chats without the `has_user_event` flag.** Older Codex builds wrote `has_user_event = 0` for chats that do contain messages, so the eligibility guard rejected every real chat. Repair now requires conversation content (a stored first user message or preview) instead of that flag, and still refuses subagent chats.
+- **Trash and Restore cover every database that references a chat.** The set of sibling databases is discovered by scanning for `*.sqlite`/`*.db` instead of a hardcoded pair, which restores coverage of `thread_history_<N>.sqlite` — Codex moved chat transcripts there and trashing a chat had been leaving the transcript rows orphaned with no way to restore them.
+- **Trash and Restore are now symmetric for state-database tables.** Deletion already discovered referencing tables from the live schema; restore did not, so trashing a chat removed its `thread_attachments` rows permanently. Restore now reinstates every discovered row set from the manifest.
+- **Relative paths are computed from canonicalised URLs.** Directory enumeration returns fully resolved paths while a URL built from a string does not, so trashing a chat could target a file that does not exist and silently skip it. Base URLs are now symlink-resolved once at construction, and relative paths resolve both sides.
+- **Large history databases are no longer copied in full.** A database above 64 MiB is restored from its row snapshot rather than a full-file copy, so trashing one chat no longer writes and retains a copy of a multi-hundred-megabyte transcript.
+
+### Added
+
+- **Codex live-session protection.** Chats currently open in Codex Desktop are detected through `~/.codex/thread-writer-locks/*.lock` and refused for move and trash, matching the existing Claude live-session guard.
+- **`--claude` / `--claude-home` for the `codex-keeper` CLI.** `doctor`, `chats`, and `projects` can now inspect Claude Code / Claude Desktop sessions. `chats wake --claude` is refused with an explanatory error because Repair Index is Codex-only.
+- SQLite busy timeouts on chat deletion and restore, so a brief writer lock from Codex no longer fails the whole operation.
+
+### Changed
+
+- `BackupKind.label` for the state database is now `Database` instead of `State DB`.
+
 ## 0.2.1 - 2026-08-17
 
 - Updated chat discovery for Codex Desktop 26.810 and hide subagent threads from the user-facing chat list while retaining their count on the parent chat.
