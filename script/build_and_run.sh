@@ -21,9 +21,21 @@ cd "$ROOT_DIR"
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
-swift build
-BUILD_BINARY="$(swift build --show-bin-path)/$APP_NAME"
-BUILD_CLI_BINARY="$(swift build --show-bin-path)/$CLI_BINARY_NAME"
+# The macOS 27 SDK needs the Xcode-only `SwiftUIMacros` plugin for `@State`.
+# `select-sdk.sh` picks a working SDK when that plugin is unavailable; with Xcode
+# installed it prints nothing and the default SDK is used. See that script for
+# the full explanation. Override with CODEX_KEEPER_SDK=/path/to/MacOSX<v>.sdk
+SDK_ARGS=()
+SELECTED_SDK="$(bash "$ROOT_DIR/script/select-sdk.sh" 2>/dev/null || true)"
+if [[ -n "$SELECTED_SDK" ]]; then
+  SDK_ARGS=(--sdk "$SELECTED_SDK")
+  echo "note: SwiftUIMacros plugin unavailable, building against $(basename "$SELECTED_SDK")"
+fi
+
+swift build ${SDK_ARGS[@]+"${SDK_ARGS[@]}"}
+BUILD_BIN_PATH="$(swift build ${SDK_ARGS[@]+"${SDK_ARGS[@]}"} --show-bin-path)"
+BUILD_BINARY="$BUILD_BIN_PATH/$APP_NAME"
+BUILD_CLI_BINARY="$BUILD_BIN_PATH/$CLI_BINARY_NAME"
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS" "$APP_RESOURCES"
@@ -70,6 +82,9 @@ open_app() {
 }
 
 case "$MODE" in
+  build|--build)
+    echo "built: $APP_BUNDLE"
+    ;;
   run)
     open_app
     ;;
@@ -90,7 +105,7 @@ case "$MODE" in
     pgrep -x "$APP_NAME" >/dev/null
     ;;
   *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify]" >&2
+    echo "usage: $0 [build|run|--debug|--logs|--telemetry|--verify]" >&2
     exit 2
     ;;
 esac
