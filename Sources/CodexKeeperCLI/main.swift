@@ -20,12 +20,24 @@ struct StoreOptions: ParsableArguments {
     @Option(name: .customLong("codex-home"), help: "Path to the Codex data directory. Defaults to ~/.codex.")
     var codexHome: String?
 
-    @Flag(name: .long, help: "Use synthetic demo data instead of reading ~/.codex.")
+    @Option(name: .customLong("claude-home"), help: "Path to the Claude data directory. Defaults to ~/.claude. Implies --claude.")
+    var claudeHome: String?
+
+    @Flag(name: .long, help: "Read Claude Code / Claude Desktop sessions instead of Codex sessions.")
+    var claude = false
+
+    @Flag(name: .long, help: "Use synthetic demo data instead of reading local data.")
     var demo = false
+
+    /// Claude is selected explicitly, or implicitly by supplying a Claude home.
+    var usesClaude: Bool { claude || claudeHome != nil }
 
     func makeStore() -> any ThreadStore {
         if demo {
             return DemoCodexStore()
+        }
+        if usesClaude {
+            return makeClaudeStore()
         }
         return makeCodexStore()
     }
@@ -34,9 +46,18 @@ struct StoreOptions: ParsableArguments {
         CodexStore(codexHome: codexHomeURL)
     }
 
+    func makeClaudeStore() -> ClaudeStore {
+        ClaudeStore(claudeHome: claudeHomeURL)
+    }
+
     var codexHomeURL: URL? {
         guard let codexHome else { return nil }
         return URL(fileURLWithPath: (codexHome as NSString).expandingTildeInPath)
+    }
+
+    var claudeHomeURL: URL? {
+        guard let claudeHome else { return nil }
+        return URL(fileURLWithPath: (claudeHome as NSString).expandingTildeInPath)
     }
 }
 
@@ -49,30 +70,73 @@ struct Doctor: ParsableCommand {
 
     func run() throws {
         try runCLI {
-            let payload: DoctorOutput
             if storeOptions.demo {
                 let store = storeOptions.makeStore()
                 let threads = try store.loadThreads()
                 let projects = ProjectSummary.make(from: threads)
-                payload = DoctorOutput(
-                    codexHome: "demo",
-                    sessionIndexPath: "demo",
-                    sessionIndexExists: false,
-                    sessionsPath: "demo",
-                    sessionsExists: false,
-                    stateRoots: [],
-                    activeStateRoot: nil,
-                    threadCount: threads.count,
-                    projectCount: projects.filter { !$0.isSynthetic }.count,
-                    backupCount: try store.loadBackups().count,
-                    trashCount: try store.loadBackupTrash().count + store.loadThreadTrash().count
+                try printDoctor(
+                    DoctorOutput(
+                        codexHome: "demo",
+                        sessionIndexPath: "demo",
+                        sessionIndexExists: false,
+                        sessionsPath: "demo",
+                        sessionsExists: false,
+                        stateRoots: [],
+                        activeStateRoot: nil,
+                        threadCount: threads.count,
+                        projectCount: projects.filter { !$0.isSynthetic }.count,
+                        backupCount: try store.loadBackups().count,
+                        trashCount: try store.loadBackupTrash().count + store.loadThreadTrash().count
+                    ),
+                    json: json
                 )
+            } else if storeOptions.usesClaude {
+                try printClaudeDoctor(try claudeDiagnostics(storeOptions), json: json)
             } else {
-                payload = DoctorOutput(try storeOptions.makeCodexStore().diagnostics())
+                try printDoctor(DoctorOutput(try storeOptions.makeCodexStore().diagnostics()), json: json)
             }
-            try printDoctor(payload, json: json)
         }
     }
+}
+
+private func claudeDiagnostics(_ options: StoreOptions) throws -> ClaudeDoctorOutput {
+    let store = options.makeClaudeStore()
+    let fileManager = FileManager.default
+    let threads = try store.loadThreads()
+    let projects = ProjectSummary.make(from: threads)
+    return ClaudeDoctorOutput(
+        claudeHome: store.homePath,
+        projectsPath: store.projectsPath,
+        projectsExists: fileManager.fileExists(atPath: store.projectsPath),
+        liveSessionsPath: store.liveSessionsPath,
+        liveSessionsExists: fileManager.fileExists(atPath: store.liveSessionsPath),
+        desktopIndexPath: store.desktopIndexPath,
+        threadCount: threads.count,
+        projectCount: projects.filter { !$0.isSynthetic }.count,
+        backupCount: try store.loadBackups().count,
+        trashCount: try store.loadBackupTrash().count + store.loadThreadTrash().count
+    )
+}
+
+private func printClaudeDoctor(_ payload: ClaudeDoctorOutput, json: Bool) throws {
+    if json {
+        try printJSON(payload)
+        return
+    }
+
+    print("Codex Keeper doctor (Claude)")
+    print("claude home: \(payload.claudeHome)")
+    print("projects: \(payload.projectsExists ? "ok" : "missing") \(payload.projectsPath)")
+    print("live sessions: \(payload.liveSessionsExists ? "ok" : "missing") \(payload.liveSessionsPath)")
+    if let desktopIndexPath = payload.desktopIndexPath {
+        print("desktop index: ok \(desktopIndexPath)")
+    } else {
+        print("desktop index: missing (Claude Desktop session index not found)")
+    }
+    print("chats: \(payload.threadCount)")
+    print("projects: \(payload.projectCount)")
+    print("backups: \(payload.backupCount)")
+    print("trash: \(payload.trashCount)")
 }
 
 struct Chats: ParsableCommand {
@@ -191,6 +255,9 @@ struct Chats: ParsableCommand {
 
         func run() throws {
             try runCLI {
+                if storeOptions.usesClaude {
+                    try fail("Repair Index is not supported for Claude sessions.", code: 1)
+                }
                 let store = storeOptions.makeStore()
                 let thread = try resolveThread(id, in: try store.loadThreads())
                 let plan = try makeWakePlan(for: thread, storeOptions: storeOptions)
@@ -771,4 +838,18 @@ private struct StateRootOutput: Encodable {
         isPrimary = true
         exists = true
     }
+}
+
+private struct ClaudeDoctorOutput: Encodable {
+    let source = "claude"
+    let claudeHome: String
+    let projectsPath: String
+    let projectsExists: Bool
+    let liveSessionsPath: String
+    let liveSessionsExists: Bool
+    let desktopIndexPath: String?
+    let threadCount: Int
+    let projectCount: Int
+    let backupCount: Int
+    let trashCount: Int
 }
