@@ -90,9 +90,20 @@ struct CodexStoreCompatibilityTests {
         try expect(try fixture.query("select count(*) from threads where id = '\(fixture.rootID)';") == "0", "Thread row remains after trash")
         try expect(try fixture.query("select count(*) from thread_dynamic_tools where thread_id = '\(fixture.rootID)';") == "0", "Dynamic tools remain after trash")
         try expect(try fixture.query("select count(*) from thread_spawn_edges where parent_thread_id = '\(fixture.rootID)';") == "0", "Spawn edges remain after trash")
+        // `thread_attachments` is discovered from the live schema. Restore has to
+        // reinstate it too, or trashing a chat silently drops its attachments.
+        try expect(try fixture.query("select count(*) from thread_attachments where thread_id = '\(fixture.rootID)';") == "0", "Attachments remain after trash")
         try expect(try fixture.queryCatalog("select count(*) from local_thread_catalog where thread_id = '\(fixture.rootID)';") == "0", "Catalog row remains after trash")
         try expect(try fixture.queryCatalog("select catalog_revision from local_thread_catalog_metadata where id = 1;") == "5", "Catalog revision was not advanced after trash")
         try expect(try fixture.queryHistorySnapshots("select count(*) from app_server_history_snapshots where thread_id = '\(fixture.rootID)';") == "0", "History snapshot remains after trash")
+        // `thread_history_1.sqlite` holds the transcript. A relative path computed
+        // from an unresolved base used to point at a file that does not exist, so
+        // Trash silently skipped it and left the transcript orphaned.
+        try expect(try fixture.queryHistory("select count(*) from thread_items where thread_id = '\(fixture.rootID)';") == "0", "Transcript items remain after trash")
+        try expect(try fixture.queryHistory("select count(*) from thread_turns where thread_id = '\(fixture.rootID)';") == "0", "Transcript turns remain after trash")
+        try expect(try fixture.queryHistory("select count(*) from thread_history_projection_state where thread_id = '\(fixture.rootID)';") == "0", "Transcript projection state remains after trash")
+        try expect(try fixture.queryHistory("select count(*) from thread_items where thread_id = '\(fixture.decoyID)';") == "1", "Trash removed another chat's transcript items")
+        try expect(try fixture.queryHistory("select count(*) from thread_turns where thread_id = '\(fixture.decoyID)';") == "1", "Trash removed another chat's transcript turns")
         try expect(!FileManager.default.fileExists(atPath: fixture.rootRollout.path), "Rollout remains after trash")
         let removedState = try fixture.readGlobalState()
         try expect((removedState["thread-project-assignments"] as? [String: Any])?[fixture.rootID] == nil, "Global assignment remains after trash")
@@ -104,9 +115,14 @@ struct CodexStoreCompatibilityTests {
         try expect(try fixture.query("select name || '|' || is_pinned || '|' || history_mode from threads where id = '\(fixture.rootID)';") == "Pinned root|1|legacy", "Current thread metadata was not restored")
         try expect(try fixture.query("select count(*) from thread_dynamic_tools where thread_id = '\(fixture.rootID)';") == "1", "Dynamic tools were not restored")
         try expect(try fixture.query("select status from thread_spawn_edges where parent_thread_id = '\(fixture.rootID)';") == "open", "Spawn edge was not restored")
+        try expect(try fixture.query("select payload from thread_attachments where thread_id = '\(fixture.rootID)';") == "{\"fixture\":true}", "Attachment was not restored")
         try expect(try fixture.queryCatalog("select display_title from local_thread_catalog where thread_id = '\(fixture.rootID)';") == "Catalog root", "Catalog row was not restored")
         try expect(try fixture.queryCatalog("select catalog_revision from local_thread_catalog_metadata where id = 1;") == "6", "Catalog revision was not advanced after restore")
         try expect(try fixture.queryHistorySnapshots("select payload_json from app_server_history_snapshots where thread_id = '\(fixture.rootID)';") == "{\"fixture\":true}", "History snapshot was not restored")
+        try expect(try fixture.queryHistory("select count(*) from thread_items where thread_id = '\(fixture.rootID)';") == "2", "Transcript items were not restored")
+        try expect(try fixture.queryHistory("select count(*) from thread_turns where thread_id = '\(fixture.rootID)';") == "1", "Transcript turns were not restored")
+        try expect(try fixture.queryHistory("select next_rollout_byte_offset from thread_history_projection_state where thread_id = '\(fixture.rootID)';") == "4096", "Transcript projection state was not restored")
+        try expect(try fixture.queryHistory("select count(*) from thread_items where thread_id = '\(fixture.decoyID)';") == "1", "Restore disturbed another chat's transcript items")
         let restoredState = try fixture.readGlobalState()
         let assignment = (restoredState["thread-project-assignments"] as? [String: Any])?[fixture.rootID] as? [String: Any]
         try expect(assignment?["projectId"] as? String == fixture.sourceProjectID, "Native project assignment was not restored")
@@ -127,10 +143,21 @@ private final class CodexFixture {
     let stateDB: URL
     let catalogDB: URL
     let historySnapshotsDB: URL
+    let historyDB: URL
     let store: CodexStore
 
+    /// A second chat that is never trashed. Its history rows prove that Trash
+    /// scopes its deletion to the requested thread instead of emptying a table.
+    let decoyID = "00000000-0000-7000-8000-000000000003"
+
     init() throws {
-        home = FileManager.default.temporaryDirectory
+        // Deliberately rooted at `/tmp` rather than `FileManager.temporaryDirectory`.
+        // On macOS `/tmp` is a symlink to `/private/tmp` and `temporaryDirectory`
+        // is one to `/private/var/...`: directory enumeration always returns the
+        // resolved `/private/...` form while a URL built from a string keeps the
+        // unresolved form. Running the fixture through a symlinked root is what
+        // reproduces that mismatch, so relative paths stay correct.
+        home = URL(fileURLWithPath: "/tmp", isDirectory: true)
             .appendingPathComponent("codex-keeper-tests-\(UUID().uuidString)", isDirectory: true)
         sourcePath = home.appendingPathComponent("projects/source", isDirectory: true).path
         destinationPath = home.appendingPathComponent("projects/destination", isDirectory: true).path
@@ -139,6 +166,7 @@ private final class CodexFixture {
         stateDB = home.appendingPathComponent("sqlite/state_5.sqlite")
         catalogDB = home.appendingPathComponent("sqlite/codex-dev.db")
         historySnapshotsDB = home.appendingPathComponent("sqlite/codex-history-snapshots-dev.db")
+        historyDB = home.appendingPathComponent("sqlite/thread_history_1.sqlite")
         store = CodexStore(codexHome: home)
 
         try FileManager.default.createDirectory(at: stateDB.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -166,6 +194,10 @@ private final class CodexFixture {
 
     func queryHistorySnapshots(_ sql: String) throws -> String {
         try runSQLite(sql, database: historySnapshotsDB).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func queryHistory(_ sql: String) throws -> String {
+        try runSQLite(sql, database: historyDB).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func readGlobalState() throws -> [String: Any] {
@@ -208,6 +240,10 @@ private final class CodexFixture {
             defer_loading integer not null default 0, namespace text,
             primary key(thread_id, position)
         );
+        create table thread_attachments (
+            id text primary key, thread_id text not null, attachment_type text not null,
+            identity_key text not null, payload text not null, created_at integer not null
+        );
         insert into threads values (
             '\(rootID)', '\(sql(rootRollout.path))', 100, 200, 'vscode', 'openai',
             '\(sql(sourcePath))', 'Root', '{}', 'never', 10, 1, 0, null,
@@ -225,6 +261,7 @@ private final class CodexFixture {
         );
         insert into thread_spawn_edges values ('\(rootID)', '\(childID)', 'open');
         insert into thread_dynamic_tools values ('\(rootID)', 0, 'fixture', 'Fixture tool', '{}', 0, 'tests');
+        insert into thread_attachments values ('attachment-1', '\(rootID)', 'file', 'key-1', '{"fixture":true}', 1700000000);
         """
         _ = try runSQLite(schema, database: stateDB)
         _ = try runSQLite(
@@ -238,6 +275,22 @@ private final class CodexFixture {
             "create table app_server_history_snapshots (thread_id text primary key, payload_json text); " +
             "insert into app_server_history_snapshots values ('\(rootID)', '{\"fixture\":true}');",
             database: historySnapshotsDB
+        )
+        // Codex moved chat transcripts out of `codex-history-snapshots-dev.db` into
+        // `thread_history_<N>.sqlite`. Trash and Restore must reach it.
+        _ = try runSQLite(
+            "create table thread_items (thread_id text, turn_id text, item_id text, item_json text, " +
+            "primary key(thread_id, turn_id, item_id)); " +
+            "create table thread_turns (thread_id text, turn_id text, status text, primary key(thread_id, turn_id)); " +
+            "create table thread_history_projection_state (thread_id text primary key, next_rollout_byte_offset integer); " +
+            "insert into thread_items values ('\(rootID)', 'turn-1', 'item-1', '{\"fixture\":1}'); " +
+            "insert into thread_items values ('\(rootID)', 'turn-1', 'item-2', '{\"fixture\":2}'); " +
+            "insert into thread_items values ('\(decoyID)', 'turn-9', 'item-9', '{\"decoy\":1}'); " +
+            "insert into thread_turns values ('\(rootID)', 'turn-1', 'done'); " +
+            "insert into thread_turns values ('\(decoyID)', 'turn-9', 'done'); " +
+            "insert into thread_history_projection_state values ('\(rootID)', 4096); " +
+            "insert into thread_history_projection_state values ('\(decoyID)', 8192);",
+            database: historyDB
         )
     }
 

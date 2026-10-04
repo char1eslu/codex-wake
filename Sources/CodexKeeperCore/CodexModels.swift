@@ -165,10 +165,21 @@ package struct CodexThread: Identifiable, Hashable {
         !isSubagent
     }
 
+    /// Codex stopped maintaining `threads.has_user_event`: on current builds it
+    /// reads 0 for every row, including threads that clearly have user messages.
+    /// Repair eligibility therefore falls back to the transcript metadata Codex
+    /// still populates, so the Repair Index workflow stays reachable.
+    package var hasConversationContent: Bool {
+        if hasUserEvent { return true }
+        if !firstUserMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+        if !preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+        return false
+    }
+
     package var needsRepair: Bool {
         if archived { return false }
         if !fileExists { return false }
-        if isSubagent || !hasUserEvent { return false }
+        if isSubagent || !hasConversationContent { return false }
         return !isInSessionIndex
     }
 
@@ -580,7 +591,7 @@ package enum BackupKind: String, Hashable {
 
     package var label: String {
         switch self {
-        case .stateDatabase: return "State DB"
+        case .stateDatabase: return "Database"
         case .sessionIndex: return "Session index"
         case .chatFile: return "Chat file"
         case .other: return "Other"

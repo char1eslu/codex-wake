@@ -11,13 +11,131 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
     private let threadTrash: URL
 
     package init(codexHome: URL? = nil) {
-        let home = codexHome ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
+        // Resolve symlinks once, here. `contentsOfDirectory` and the directory
+        // enumerator always hand back fully resolved paths, so a base URL that
+        // kept an unresolved `/tmp`, `/private/var` or user-supplied symlink
+        // would fail every `hasPrefix` containment check below (and the relative
+        // paths used by Trash/Restore would point outside the home). Deriving
+        // every other URL from this resolved base keeps both sides comparable.
+        let home = (codexHome ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex"))
+            .resolvingSymlinksInPath()
         self.codexHome = home
-        self.stateDB = home.appendingPathComponent("sqlite", isDirectory: true).appendingPathComponent("state_5.sqlite")
+        self.stateDB = Self.discoverStateDatabase(in: home)
         self.sessionIndex = home.appendingPathComponent("session_index.jsonl")
         self.globalState = home.appendingPathComponent(".codex-global-state.json")
         self.backupTrash = home.appendingPathComponent(".codex-wake-trash", isDirectory: true)
         self.threadTrash = backupTrash.appendingPathComponent("threads", isDirectory: true)
+    }
+
+    // MARK: - State database discovery
+
+    /// Codex has shipped its thread state under `state_<N>.sqlite`, bumping the
+    /// version number as the schema evolved (`state_4` -> `state_5`), and older
+    /// builds also kept the file at the `~/.codex` root before moving it into
+    /// `sqlite/`. Hardcoding one filename means a single upstream bump makes the
+    /// whole app report "state database not found".
+    ///
+    /// Discovery picks the highest version that actually contains a `threads`
+    /// table, preferring the modern `sqlite/` directory on ties. When nothing
+    /// qualifies it returns the conventional path so error messages stay useful.
+    static func discoverStateDatabase(in codexHome: URL) -> URL {
+        let fileManager = FileManager.default
+        let searchRoots = [
+            codexHome.appendingPathComponent("sqlite", isDirectory: true),
+            codexHome
+        ]
+
+        var candidates: [(version: Int, rootPriority: Int, url: URL)] = []
+        for (priority, root) in searchRoots.enumerated() {
+            guard let entries = try? fileManager.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: []
+            ) else { continue }
+            for entry in entries {
+                guard let version = stateDatabaseVersion(fromFileName: entry.lastPathComponent) else { continue }
+                guard (try? entry.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else { continue }
+                candidates.append((version, priority, entry))
+            }
+        }
+
+        let ordered = candidates.sorted { lhs, rhs in
+            if lhs.version != rhs.version { return lhs.version > rhs.version }
+            return lhs.rootPriority < rhs.rootPriority
+        }
+        for candidate in ordered where databaseHasThreadsTable(candidate.url) {
+            return candidate.url
+        }
+        // Nothing looked readable — fall back to the newest candidate so the
+        // caller's error names a file that actually exists rather than the
+        // conventional path, which may not.
+        if let newest = ordered.first {
+            return newest.url
+        }
+        return defaultStateDatabase(in: codexHome)
+    }
+
+    static func defaultStateDatabase(in codexHome: URL) -> URL {
+        codexHome.appendingPathComponent("sqlite", isDirectory: true)
+            .appendingPathComponent("state_5.sqlite")
+    }
+
+    /// Matches `state_7.sqlite` but not `state_7.sqlite-wal`, `-shm`, or backups.
+    static func stateDatabaseVersion(fromFileName fileName: String) -> Int? {
+        let prefix = "state_"
+        let suffix = ".sqlite"
+        guard fileName.hasPrefix(prefix), fileName.hasSuffix(suffix) else { return nil }
+        let middle = fileName.dropFirst(prefix.count).dropLast(suffix.count)
+        guard !middle.isEmpty, middle.allSatisfy(\.isNumber), let version = Int(middle) else { return nil }
+        return version
+    }
+
+    /// Accepts the state database itself plus its `-wal` / `-shm` sidecars.
+    static func isStateDatabaseBackupName(_ fileName: String) -> Bool {
+        for suffix in ["-wal", "-shm"] where fileName.hasSuffix(suffix) {
+            return stateDatabaseVersion(fromFileName: String(fileName.dropLast(suffix.count))) != nil
+        }
+        return stateDatabaseVersion(fromFileName: fileName) != nil
+    }
+
+    private static func databaseHasThreadsTable(_ url: URL) -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path) else { return false }
+        // A read-only open can fail transiently while Codex is checkpointing its
+        // WAL, so fall back to an immutable view that ignores uncheckpointed WAL
+        // rather than declaring the database unusable.
+        if threadsTableExists(at: url, immutable: false) { return true }
+        return threadsTableExists(at: url, immutable: true)
+    }
+
+    private static func threadsTableExists(at url: URL, immutable: Bool) -> Bool {
+        var database: OpaquePointer?
+        let openResult: Int32
+        if immutable {
+            var allowed = CharacterSet(charactersIn: "/")
+            allowed.formUnion(.alphanumerics)
+            let encoded = url.path.addingPercentEncoding(withAllowedCharacters: allowed) ?? url.path
+            openResult = sqlite3_open_v2(
+                "file:\(encoded)?immutable=1",
+                &database,
+                SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_URI,
+                nil
+            )
+        } else {
+            openResult = sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil)
+        }
+        guard openResult == SQLITE_OK, let database else {
+            if let database { sqlite3_close(database) }
+            return false
+        }
+        defer { sqlite3_close(database) }
+
+        var statement: OpaquePointer?
+        let query = "select 1 from sqlite_master where type = 'table' and name = 'threads';"
+        guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK,
+              let statement
+        else { return false }
+        defer { sqlite3_finalize(statement) }
+        return sqlite3_step(statement) == SQLITE_ROW
     }
 
     package func loadActiveStateRoot() throws -> ActiveStateRoot? {
@@ -219,7 +337,8 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
             let directoryURL = url.deletingLastPathComponent()
             let originalDirectoryURL: URL
             if includeTrash {
-                let relativeDirectory = String(directoryURL.path.dropFirst(backupTrash.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                let relativeDirectory = (directoryURL.relativePath(from: backupTrash) ?? "")
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
                 originalDirectoryURL = relativeDirectory.isEmpty
                     ? codexHome
                     : codexHome.appendingPathComponent(relativeDirectory, isDirectory: true)
@@ -264,7 +383,8 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         }
 
         let sourceDirectory = source.deletingLastPathComponent()
-        let relativeDirectory = String(sourceDirectory.path.dropFirst(codexHome.standardizedFileURL.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let relativeDirectory = (sourceDirectory.relativePath(from: codexHome) ?? "")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let destinationDirectory = relativeDirectory.isEmpty
             ? backupTrash
             : backupTrash.appendingPathComponent(relativeDirectory, isDirectory: true)
@@ -421,8 +541,11 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
     }
 
     package func wake(thread: CodexThread) throws -> WakeReport {
-        guard thread.isUserFacing, thread.hasUserEvent else {
-            throw WakeError.commandFailed("Subagent chats cannot be added to the user session index.")
+        guard thread.isUserFacing else {
+            throw WakeError.commandFailed("Subagent chats follow their parent chat and cannot be added to the user session index on their own.")
+        }
+        guard thread.hasConversationContent else {
+            throw WakeError.commandFailed("This chat has no recorded user message, so there is nothing to add to the session index.")
         }
         guard fileManager.fileExists(atPath: thread.rolloutPath) else {
             throw WakeError.missingThreadFile(thread.rolloutPath)
@@ -578,6 +701,53 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         )
     }
 
+    // MARK: - Live thread protection
+
+    /// Threads Codex is currently writing, detected through the advisory `flock`
+    /// it holds on `~/.codex/thread-writer-locks/<thread-id>.lock`.
+    ///
+    /// Existence of the file is not enough — Codex leaves stale lock files behind
+    /// after a crash — so the lock is probed directly: taking a non-blocking
+    /// exclusive lock succeeds only when nobody else holds it. Moving or trashing
+    /// a thread mid-turn would race the writer, which keeps appending to the
+    /// original rollout path and recreates what was moved.
+    private func liveThreadIDs() -> Set<String> {
+        let locksDirectory = codexHome.appendingPathComponent("thread-writer-locks", isDirectory: true)
+        guard let files = try? fileManager.contentsOfDirectory(
+            at: locksDirectory,
+            includingPropertiesForKeys: nil,
+            options: []
+        ) else { return [] }
+
+        var live = Set<String>()
+        for file in files where file.pathExtension == "lock" {
+            let threadID = file.deletingPathExtension().lastPathComponent
+            guard !threadID.isEmpty, !threadID.hasPrefix(".") else { continue }
+            guard Self.advisoryLockIsHeld(atPath: file.path) else { continue }
+            live.insert(threadID)
+        }
+        return live
+    }
+
+    /// True when another process holds an exclusive `flock` on the file.
+    static func advisoryLockIsHeld(atPath path: String) -> Bool {
+        let descriptor = open(path, O_RDONLY)
+        guard descriptor >= 0 else { return false }
+        defer { close(descriptor) }
+        if flock(descriptor, LOCK_EX | LOCK_NB) == 0 {
+            _ = flock(descriptor, LOCK_UN)
+            return false
+        }
+        return errno == EWOULDBLOCK || errno == EAGAIN
+    }
+
+    private func throwIfLive(_ thread: CodexThread) throws {
+        guard liveThreadIDs().contains(thread.id) else { return }
+        throw WakeError.commandFailed(
+            "This chat is open in Codex right now. Close that conversation in Codex Desktop, then try again."
+        )
+    }
+
     package func move(thread: CodexThread, to project: ProjectSummary) throws -> MoveReport {
         guard thread.isUserFacing else {
             throw WakeError.commandFailed("Subagent chats follow their parent chat and cannot be moved independently.")
@@ -588,6 +758,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         guard fileManager.fileExists(atPath: thread.rolloutPath) else {
             throw WakeError.missingThreadFile(thread.rolloutPath)
         }
+        try throwIfLive(thread)
 
         let stamp = backupStamp()
         let backupSuffix = "\(stamp)-move"
@@ -638,6 +809,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         guard thread.isUserFacing else {
             throw WakeError.commandFailed("Subagent chats follow their parent chat and cannot be deleted independently.")
         }
+        try throwIfLive(thread)
         let rolloutURL = thread.rolloutURL.standardizedFileURL
         let sessionsRoot = codexHome.appendingPathComponent("sessions", isDirectory: true).standardizedFileURL
         let fileExists = fileManager.fileExists(atPath: rolloutURL.path)
@@ -649,6 +821,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         let sessionIndexEntry = try loadSessionIndex()[thread.id]
         let spawnEdges = try loadSpawnEdgesReferencing(threadID: thread.id)
         let dynamicTools = try loadDynamicTools(threadID: thread.id)
+        let relatedRows = try loadRelatedStateRows(threadID: thread.id)
         let externalDatabases = try externalDatabaseSnapshots(threadID: thread.id)
         let originalGlobalState = try Data(contentsOf: globalState)
         let removedGlobalState = try globalStateDataRemovingThread(
@@ -693,7 +866,8 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
                 spawnEdges: spawnEdges,
                 dynamicTools: dynamicTools,
                 projectState: removedGlobalState.projectState,
-                externalDatabases: externalDatabases
+                externalDatabases: externalDatabases,
+                relatedRows: relatedRows
             )
             try writeTrashManifest(manifest, to: trashDirectory.appendingPathComponent("manifest.json"))
 
@@ -716,6 +890,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
             if (try? loadFullThreadRecord(threadID: thread.id)) == nil {
                 try? insertFullThreadRecord(sqliteRecord)
                 try? restoreRelatedMetadata(spawnEdges: spawnEdges, dynamicTools: dynamicTools)
+                try? restoreRelatedStateRows(relatedRows)
             }
             try? restoreExternalDatabaseSnapshots(externalDatabases)
             try? writeDataAtomically(originalGlobalState, to: globalState)
@@ -784,6 +959,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
 
         do {
             try insertFullThreadRecord(manifest.sqliteRecord)
+            try restoreRelatedStateRows(manifest.relatedRows ?? [])
             try restoreRelatedMetadata(
                 spawnEdges: manifest.spawnEdges ?? [],
                 dynamicTools: manifest.dynamicTools ?? []
@@ -977,7 +1153,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
     }
 
     private func backupKind(for originalName: String) -> BackupKind {
-        if originalName == "state_5.sqlite" || originalName.hasPrefix("state_5.sqlite-") {
+        if Self.isStateDatabaseBackupName(originalName) || originalName.hasSuffix(".sqlite") || originalName.hasSuffix(".db") {
             return .stateDatabase
         }
         if originalName == "session_index.jsonl" {
@@ -1292,6 +1468,19 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         return database
     }
 
+    /// Read-only open that tolerates a database Codex is actively writing: a
+    /// plain read-only open can fail while the WAL is being checkpointed, so the
+    /// immutable view is used as a fallback. The schema it reports is still the
+    /// right one; only uncheckpointed rows may be missing, which is acceptable
+    /// for schema discovery and row snapshots taken just before a deletion.
+    private func openReadOnlyResilient(_ url: URL) throws -> OpaquePointer {
+        do {
+            return try openReadOnly(url)
+        } catch {
+            return try openReadOnlyImmutable(url)
+        }
+    }
+
     private func vacuumSnapshot(of source: URL, to destination: URL) throws -> URL {
         if fileManager.fileExists(atPath: destination.path) {
             try fileManager.removeItem(at: destination)
@@ -1580,16 +1769,119 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         }
     }
 
+    /// Column names that tie a row in any Codex table back to a chat.
+    static let threadReferenceColumnNames: Set<String> = ["thread_id", "parent_thread_id", "child_thread_id"]
+
+    /// Tables in the state database that reference a chat, discovered from the
+    /// live schema rather than hardcoded — Codex adds tables over time (for
+    /// example `thread_attachments`) and a fixed list leaves half-deleted chats.
+    private func threadDeletionTargets(in url: URL) throws -> [(table: String, columns: [String])] {
+        let database = try openReadOnlyResilient(url)
+        defer { sqlite3_close(database) }
+
+        var targets: [(table: String, columns: [String])] = []
+        for table in sqliteTables(database) {
+            let columns = try sqliteColumns(database, table: table)
+            let referenceColumns = columns.filter(Self.threadReferenceColumnNames.contains)
+            guard !referenceColumns.isEmpty else { continue }
+            targets.append((table, referenceColumns))
+        }
+        return targets
+    }
+
+    /// Every row in the state database that references a chat, discovered from
+    /// the live schema — the same discovery `deleteSQLiteThread` uses to remove
+    /// them.
+    ///
+    /// Trash and Restore must stay symmetric. Deleting a discovered set while
+    /// restoring only a hardcoded pair (`thread_dynamic_tools`,
+    /// `thread_spawn_edges`) permanently dropped newer tables: trashing a chat
+    /// removed its `thread_attachments` rows and Restore could not put them back.
+    /// The `threads` table itself is excluded because it round-trips through the
+    /// typed `ThreadSQLiteRecord` instead.
+    private func loadRelatedStateRows(threadID: String) throws -> [SQLiteRowSnapshot] {
+        let database = try openReadOnlyResilient(stateDB)
+        defer { sqlite3_close(database) }
+
+        var rows: [SQLiteRowSnapshot] = []
+        for target in try threadDeletionTargets(in: stateDB) where target.table != "threads" {
+            let whereClause = target.columns
+                .map { "\(quotedIdentifier($0)) = ?" }
+                .joined(separator: " or ")
+            let query = "select * from \(quotedIdentifier(target.table)) where \(whereClause);"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK,
+                  let statement
+            else { throw sqliteError(database, context: "Cannot snapshot \(target.table)") }
+            defer { sqlite3_finalize(statement) }
+            for index in target.columns.indices {
+                bindText(threadID, to: statement, index: Int32(index + 1))
+            }
+            let selectedColumns = (0..<sqlite3_column_count(statement)).map {
+                String(cString: sqlite3_column_name(statement, $0))
+            }
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let values = (0..<sqlite3_column_count(statement)).map {
+                    sqliteValue(statement, index: $0)
+                }
+                rows.append(SQLiteRowSnapshot(table: target.table, columns: selectedColumns, values: values))
+            }
+        }
+        return rows
+    }
+
+    private func restoreRelatedStateRows(_ rows: [SQLiteRowSnapshot]) throws {
+        guard !rows.isEmpty else { return }
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(stateDB.path, &database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+              let database
+        else {
+            if let database { sqlite3_close(database) }
+            throw WakeError.commandFailed("Cannot open the Codex state database for chat restore.")
+        }
+        defer { sqlite3_close(database) }
+        sqlite3_busy_timeout(database, 3_000)
+        guard sqlite3_exec(database, "begin immediate;", nil, nil, nil) == SQLITE_OK else {
+            throw sqliteError(database, context: "Cannot start related metadata restore")
+        }
+        do {
+            for row in rows {
+                let columns = row.columns.map(quotedIdentifier).joined(separator: ", ")
+                let placeholders = Array(repeating: "?", count: row.values.count).joined(separator: ", ")
+                let query = "insert or replace into \(quotedIdentifier(row.table)) (\(columns)) values (\(placeholders));"
+                var statement: OpaquePointer?
+                guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK,
+                      let statement
+                else { throw sqliteError(database, context: "Cannot restore \(row.table)") }
+                defer { sqlite3_finalize(statement) }
+                for (index, value) in row.values.enumerated() {
+                    bindSQLiteValue(value, to: statement, index: Int32(index + 1))
+                }
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw sqliteError(database, context: "Cannot restore \(row.table)")
+                }
+            }
+            guard sqlite3_exec(database, "commit;", nil, nil, nil) == SQLITE_OK else {
+                throw sqliteError(database, context: "Cannot commit related metadata restore")
+            }
+        } catch {
+            sqlite3_exec(database, "rollback;", nil, nil, nil)
+            throw error
+        }
+    }
+
     private func deleteSQLiteThread(threadID: String) throws {
         let escapedID = sql(threadID)
-        let statementSQL = """
-        begin immediate;
-        delete from thread_dynamic_tools where thread_id = '\(escapedID)';
-        delete from thread_spawn_edges where parent_thread_id = '\(escapedID)' or child_thread_id = '\(escapedID)';
-        delete from threads where id = '\(escapedID)';
-        commit;
-        """
-        _ = try Shell.run("/usr/bin/sqlite3", [stateDB.path, statementSQL])
+        var statements = ["begin immediate;"]
+        for target in try threadDeletionTargets(in: stateDB) {
+            let whereClause = target.columns
+                .map { "\(quotedIdentifier($0)) = '\(escapedID)'" }
+                .joined(separator: " or ")
+            statements.append("delete from \(quotedIdentifier(target.table)) where \(whereClause);")
+        }
+        statements.append("delete from threads where id = '\(escapedID)';")
+        statements.append("commit;")
+        _ = try Shell.run("/usr/bin/sqlite3", [stateDB.path, statements.joined(separator: "\n")])
         let remaining = try Shell.run(
             "/usr/bin/sqlite3",
             [stateDB.path, "select count(*) from threads where id = '\(escapedID)';"]
@@ -1674,14 +1966,47 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         _ = try Shell.run("/usr/bin/sqlite3", [stateDB.path, statements.joined(separator: "\n")])
     }
 
-    private func externalDatabaseSnapshots(threadID: String) throws -> [SQLiteDatabaseSnapshot] {
-        let urls = [
-            codexHome.appendingPathComponent("sqlite/codex-dev.db"),
-            codexHome.appendingPathComponent("sqlite/codex-history-snapshots-dev.db")
+    /// Every SQLite database Codex keeps beside the state database is scanned for
+    /// rows that reference a thread id, so Trash/Restore stay consistent with the
+    /// current Codex layout.
+    ///
+    /// The set is discovered rather than hardcoded: Codex moved chat history out
+    /// of `codex-history-snapshots-dev.db` into `thread_history_<N>.sqlite`, and a
+    /// hardcoded list silently stopped covering it — trashing a chat left its
+    /// transcript rows orphaned and Restore could not reinstate them.
+    private func externalDatabaseURLs() -> [URL] {
+        let roots = [
+            codexHome.appendingPathComponent("sqlite", isDirectory: true),
+            codexHome
         ]
-        return try urls.compactMap { url in
-            guard fileManager.fileExists(atPath: url.path) else { return nil }
-            return try snapshotDatabase(url, threadID: threadID)
+        let stateDBPath = stateDB.standardizedFileURL.path
+        var seen = Set<String>()
+        var urls: [URL] = []
+        for root in roots {
+            guard let entries = try? fileManager.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: []
+            ) else { continue }
+            for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+                let name = entry.lastPathComponent
+                guard name.hasSuffix(".sqlite") || name.hasSuffix(".db") else { continue }
+                guard (try? entry.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else { continue }
+                let path = entry.standardizedFileURL.path
+                guard path != stateDBPath, !Self.isStateDatabaseBackupName(name), !seen.contains(path) else { continue }
+                seen.insert(path)
+                urls.append(entry)
+            }
+        }
+        return urls
+    }
+
+    private func externalDatabaseSnapshots(threadID: String) throws -> [SQLiteDatabaseSnapshot] {
+        // A database that cannot be read right now (actively written, unreadable
+        // sidecar) is skipped rather than failing the whole operation; Trash must
+        // still work for the state database and the chat file.
+        externalDatabaseURLs().compactMap { url in
+            try? snapshotDatabase(url, threadID: threadID)
         }
     }
 
@@ -1691,6 +2016,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
     ) throws -> [String] {
         var backups: [String] = []
         for snapshot in snapshots where !snapshot.rows.isEmpty {
+            guard snapshot.fullFileBackup ?? true else { continue }
             let source = codexHome.appendingPathComponent(snapshot.relativePath)
             guard fileManager.fileExists(atPath: source.path) else { continue }
             let destination = source.deletingLastPathComponent()
@@ -1705,7 +2031,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
     }
 
     private func snapshotDatabase(_ url: URL, threadID: String) throws -> SQLiteDatabaseSnapshot {
-        let database = try openReadOnly(url)
+        let database = try openReadOnlyResilient(url)
         defer { sqlite3_close(database) }
         var rows: [SQLiteRowSnapshot] = []
 
@@ -1737,9 +2063,22 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
             }
         }
 
-        let relativePath = String(url.path.dropFirst(codexHome.path.count + 1))
-        return SQLiteDatabaseSnapshot(relativePath: relativePath, rows: rows)
+        let relativePath = url.relativePath(from: codexHome) ?? url.lastPathComponent
+        // The row snapshot in the manifest is enough to restore a chat. A
+        // full-file copy of a multi-hundred-megabyte history database would be
+        // written and then retained on every single trashed chat, so large
+        // databases are restored from `rows` alone.
+        let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        return SQLiteDatabaseSnapshot(
+            relativePath: relativePath,
+            rows: rows,
+            fullFileBackup: fileSize <= Self.fullFileBackupByteLimit
+        )
     }
+
+    /// 64 MiB: comfortably above Codex's small metadata databases and far below
+    /// its transcript/history databases.
+    static let fullFileBackupByteLimit = 64 * 1024 * 1024
 
     private func deleteExternalDatabaseReferences(
         _ snapshots: [SQLiteDatabaseSnapshot],
@@ -1756,6 +2095,9 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
                 throw WakeError.commandFailed("Cannot open \(snapshot.relativePath) for chat deletion.")
             }
             defer { sqlite3_close(database) }
+            // Codex keeps these databases in WAL mode and may hold the writer for
+            // a moment; wait briefly instead of failing the whole Trash action.
+            sqlite3_busy_timeout(database, 3_000)
             guard sqlite3_exec(database, "begin immediate;", nil, nil, nil) == SQLITE_OK else {
                 throw sqliteError(database, context: "Cannot start chat deletion")
             }
@@ -1798,6 +2140,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
                 throw WakeError.commandFailed("Cannot open \(snapshot.relativePath) for chat restore.")
             }
             defer { sqlite3_close(database) }
+            sqlite3_busy_timeout(database, 3_000)
             guard sqlite3_exec(database, "begin immediate;", nil, nil, nil) == SQLITE_OK else {
                 throw sqliteError(database, context: "Cannot start chat restore")
             }
@@ -2402,6 +2745,10 @@ private struct TrashedThreadManifest: Codable {
     let dynamicTools: [ThreadDynamicToolRecord]?
     let projectState: ThreadProjectState?
     let externalDatabases: [SQLiteDatabaseSnapshot]?
+    /// Rows from every other state-database table that referenced the chat,
+    /// discovered from the live schema. Absent in manifests written before this
+    /// field existed, which is why it is optional.
+    let relatedRows: [SQLiteRowSnapshot]?
 }
 
 private struct ThreadSQLiteRecord: Codable {
@@ -2466,6 +2813,8 @@ private struct ThreadProjectState: Codable {
 private struct SQLiteDatabaseSnapshot: Codable {
     let relativePath: String
     let rows: [SQLiteRowSnapshot]
+    /// Absent in manifests written before large-database support; treated as true.
+    let fullFileBackup: Bool?
 }
 
 private struct SQLiteRowSnapshot: Codable {

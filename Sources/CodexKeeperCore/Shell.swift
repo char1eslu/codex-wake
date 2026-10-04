@@ -26,6 +26,28 @@ package struct Shell {
     }
 }
 
+package extension URL {
+    /// Path of the receiver relative to `base`.
+    ///
+    /// Both sides are canonicalised with `resolvingSymlinksInPath()` before they
+    /// are compared. Directory enumeration hands back fully resolved paths
+    /// (`/tmp/...` arrives as `/private/tmp/...`, and a base that is itself a
+    /// symlink arrives as its target) while a base URL built from a string keeps
+    /// the unresolved form. Comparing raw paths then silently truncates the
+    /// result and yields a relative path that points somewhere else — trashing a
+    /// chat would miss its history database. `standardizedFileURL` is not enough
+    /// here: it normalises the `/private` prefix but does not follow a symlink
+    /// that the base itself is, which returns nil below.
+    /// Returns nil when the receiver is not inside `base`.
+    func relativePath(from base: URL) -> String? {
+        let basePath = base.resolvingSymlinksInPath().path
+        let selfPath = resolvingSymlinksInPath().path
+        if selfPath == basePath { return "" }
+        guard selfPath.hasPrefix(basePath + "/") else { return nil }
+        return String(selfPath.dropFirst(basePath.count + 1))
+    }
+}
+
 package enum WakeError: LocalizedError {
     case commandFailed(String)
     case missingCodexHome(URL)

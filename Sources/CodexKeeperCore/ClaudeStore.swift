@@ -8,12 +8,26 @@ package final class ClaudeStore: ThreadStore, @unchecked Sendable {
     private let threadTrash: URL
 
     package init(claudeHome: URL? = nil) {
-        let home = claudeHome ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude")
+        // See `CodexStore.init`: resolving symlinks once keeps the base URL
+        // comparable with the resolved paths that directory enumeration returns.
+        let home = (claudeHome ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude"))
+            .resolvingSymlinksInPath()
         self.claudeHome = home
         self.projectsRoot = home.appendingPathComponent("projects", isDirectory: true)
         self.backupTrash = home.appendingPathComponent(".claude-keeper-trash", isDirectory: true)
         self.threadTrash = backupTrash.appendingPathComponent("threads", isDirectory: true)
     }
+
+    // MARK: - Locations
+
+    package var homePath: String { claudeHome.path }
+    package var projectsPath: String { projectsRoot.path }
+
+    package var liveSessionsPath: String {
+        claudeHome.appendingPathComponent("sessions", isDirectory: true).path
+    }
+
+    package var desktopIndexPath: String? { desktopSessionsRoot?.path }
 
     // MARK: - Browsing
 
@@ -359,7 +373,7 @@ package final class ClaudeStore: ThreadStore, @unchecked Sendable {
 
     func syncDesktopIndexEntry(threadID: String, newCWD: String, sessionFile: URL) throws -> [String] {
         guard let root = desktopSessionsRoot else { return [] }
-        var entries = try allDesktopIndexEntries(under: root)
+        let entries = try allDesktopIndexEntries(under: root)
         var changed: [String] = []
         let title = Self.sessionTitle(from: sessionFile) ?? threadID
 
@@ -646,7 +660,7 @@ package final class ClaudeStore: ThreadStore, @unchecked Sendable {
             let directoryURL = url.deletingLastPathComponent()
             let originalDirectoryURL: URL
             if includeTrash {
-                let relativeDirectory = String(directoryURL.path.dropFirst(backupTrash.path.count))
+                let relativeDirectory = (directoryURL.relativePath(from: backupTrash) ?? "")
                     .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
                 originalDirectoryURL = relativeDirectory.isEmpty
                     ? claudeHome
@@ -689,7 +703,7 @@ package final class ClaudeStore: ThreadStore, @unchecked Sendable {
             throw WakeError.commandFailed("Refusing to move non-Claude Keeper backup file")
         }
         let sourceDirectory = source.deletingLastPathComponent()
-        let relativeDirectory = String(sourceDirectory.path.dropFirst(claudeHome.standardizedFileURL.path.count))
+        let relativeDirectory = (sourceDirectory.relativePath(from: claudeHome) ?? "")
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let destinationDirectory = relativeDirectory.isEmpty
             ? backupTrash
