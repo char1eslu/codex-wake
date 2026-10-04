@@ -266,6 +266,28 @@ dist/Codex Keeper.app
 
 Local bundles are ad-hoc signed so `codesign --verify --deep --strict` can validate the staged app. This is suitable for local testing. It is not Developer ID signing or notarization.
 
+### Building without Xcode
+
+The macOS 27 SDK turned SwiftUI's `@State` into a macro backed by the `SwiftUIMacros` host plugin, and that plugin ships only with Xcode. On a machine with Command Line Tools alone, `swift build` against the default SDK therefore fails with:
+
+```text
+error: external macro implementation type 'SwiftUIMacros.StateMacro' could not be found
+```
+
+The macOS 26 SDK still declares `@State` as a plain property wrapper and needs no plugin. `script/select-sdk.sh` detects this and the build scripts automatically fall back to the newest installed SDK that builds, printing:
+
+```text
+note: SwiftUIMacros plugin unavailable, building against MacOSX26.5.sdk
+```
+
+With Xcode installed the plugin is found, the note does not appear, and the default SDK is used unchanged. To force a specific SDK:
+
+```sh
+CODEX_KEEPER_SDK=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk ./script/build_and_run.sh build
+```
+
+`./script/build_and_run.sh build` builds and stages the bundle without launching it.
+
 ## Window Layout
 
 The main window is sized for the three-pane desktop workflow:

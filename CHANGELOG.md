@@ -12,11 +12,15 @@ All notable changes to Codex Keeper, formerly Codex Wake, are documented here.
 - **Trash and Restore are now symmetric for state-database tables.** Deletion already discovered referencing tables from the live schema; restore did not, so trashing a chat removed its `thread_attachments` rows permanently. Restore now reinstates every discovered row set from the manifest.
 - **Relative paths are computed from canonicalised URLs.** Directory enumeration returns fully resolved paths while a URL built from a string does not, so trashing a chat could target a file that does not exist and silently skip it. Base URLs are now symlink-resolved once at construction, and relative paths resolve both sides.
 - **Large history databases are no longer copied in full.** A database above 64 MiB is restored from its row snapshot rather than a full-file copy, so trashing one chat no longer writes and retains a copy of a multi-hundred-megabyte transcript.
+- **The app builds again on machines without Xcode.** The macOS 27 SDK turned SwiftUI's `@State` into a macro backed by the `SwiftUIMacros` host plugin, which ships only with Xcode; the default SDK therefore failed with `external macro implementation type 'SwiftUIMacros.StateMacro' could not be found`. Both build scripts now fall back to the newest installed SDK that does not require the plugin (the macOS 26 SDK still declares `@State` as a plain property wrapper). Nothing changes when Xcode is present.
+- `scripts/build-app.sh` derived its build output directory from `.build/<configuration>`, which no longer matches where SwiftPM places products; it now asks SwiftPM via `--show-bin-path`.
 
 ### Added
 
 - **Codex live-session protection.** Chats currently open in Codex Desktop are detected through `~/.codex/thread-writer-locks/*.lock` and refused for move and trash, matching the existing Claude live-session guard.
 - **`--claude` / `--claude-home` for the `codex-keeper` CLI.** `doctor`, `chats`, and `projects` can now inspect Claude Code / Claude Desktop sessions. `chats wake --claude` is refused with an explanatory error because Repair Index is Codex-only.
+- **`./script/build_and_run.sh build`** stages the `.app` bundle without launching it.
+- `script/select-sdk.sh` picks a buildable SDK when the `SwiftUIMacros` plugin is unavailable, so the app still builds on a Command Line Tools-only machine. Override with `CODEX_KEEPER_SDK`.
 - SQLite busy timeouts on chat deletion and restore, so a brief writer lock from Codex no longer fails the whole operation.
 
 ### Changed
