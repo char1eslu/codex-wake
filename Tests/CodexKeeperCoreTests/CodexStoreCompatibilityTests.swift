@@ -10,6 +10,7 @@ private struct CompatibilityTestRunner {
         try suite.testMoveUpdatesSQLiteRolloutAndNativeProjectMetadata()
         try suite.testTrashAndRestorePreserveCurrentMetadataAndRelations()
         try suite.testCompressedRolloutsStayFullyUsable()
+        try suite.testClientProjectAssignmentsDriveGrouping()
         print("Codex Keeper compatibility tests passed")
     }
 }
@@ -237,6 +238,83 @@ struct CodexStoreCompatibilityTests {
         try expect(restored.fileExists, "Restored compressed rollout is not reported as present")
         _ = try fixture.store.loadPreview(for: restored)
     }
+
+    /// The client files chats through `thread-project-assignments`. `threads.cwd`
+    /// only records where a chat was *launched* and is never rewritten when the
+    /// chat is filed elsewhere, so grouping by `cwd`:
+    ///
+    /// - kept counting a chat in the directory it was moved out of (a real store
+    ///   showed 4 chats in `~/Downloads` where the client and magpie showed 2),
+    /// - hid a project entirely, because none of its chats were launched in it,
+    /// - and split one project across two sidebar rows — an assigned chat grouped
+    ///   under the project id, an unassigned one under the raw path.
+    func testClientProjectAssignmentsDriveGrouping() throws {
+        let fixture = try CodexFixture()
+        defer { try? fixture.remove() }
+
+        // The fixture files the root chat under `Source`, launched in the same
+        // directory, so both resolution steps agree.
+        let assigned = try fixture.rootThread()
+        try expect(assigned.projectID == fixture.sourceProjectID, "An explicit assignment was ignored")
+        try expect(assigned.projectName == "Source", "The client's project name was ignored")
+        try expect(assigned.projectPath == fixture.sourcePath, "The project directory was not resolved")
+
+        // Re-file the chat the way the client does — assignment only.
+        try fixture.assign(threadID: fixture.rootID, to: fixture.destinationProjectID)
+        try expect(
+            try fixture.query("select cwd from threads where id = '\(fixture.rootID)';") == fixture.sourcePath,
+            "The test did not leave the launch directory stale"
+        )
+        let refiled = try fixture.rootThread()
+        try expect(refiled.projectID == fixture.destinationProjectID, "Grouping still followed the stale launch directory")
+        try expect(refiled.projectName == "Destination", "The re-filed project name was not resolved")
+        try expect(refiled.projectPath == fixture.destinationPath, "The re-filed project directory was not resolved")
+
+        let summaries = ProjectSummary.make(from: try fixture.store.loadThreads())
+        try expect(
+            summaries.filter { $0.id == fixture.destinationProjectID }.count == 1,
+            "The re-filed project is missing from the sidebar"
+        )
+        try expect(
+            !summaries.contains { $0.id == fixture.sourcePath },
+            "The stale launch directory is still listed as a project of its own"
+        )
+        let paths = summaries.map(\.path).filter { !$0.isEmpty }
+        try expect(Set(paths).count == paths.count, "Two sidebar rows point at the same project directory")
+
+        // A chat the client never filed, launched inside a project root, has to
+        // join that project rather than forming a second row for the directory.
+        // The fixture child is exactly that chat.
+        let all = try fixture.store.loadThreads(includeSubagents: true)
+        let child = try require(all.first(where: { $0.id == fixture.childID }), "Fixture child thread is missing")
+        try expect(
+            child.projectID == fixture.sourceProjectID,
+            "An unfiled chat did not join the project owning its launch directory"
+        )
+
+        // A dangling assignment is treated as "unfiled": it must not be turned
+        // into a project, and the chat falls back to the project owning its
+        // launch directory.
+        try fixture.assign(threadID: fixture.rootID, to: "local-does-not-exist")
+        let dangling = try fixture.rootThread()
+        try expect(
+            dangling.project?.id != "local-does-not-exist",
+            "A dangling assignment was turned into a project"
+        )
+        try expect(
+            dangling.projectID == fixture.sourceProjectID,
+            "A dangling assignment did not fall back to the launch directory's project"
+        )
+
+        // An unfiled chat whose directory no project owns falls back to the raw
+        // `cwd` — the grouping the app used before projects were resolved.
+        let orphanPath = fixture.home.appendingPathComponent("projects/orphan", isDirectory: true).path
+        try fixture.exec("update threads set cwd = '\(orphanPath)' where id = '\(fixture.rootID)';")
+        let orphan = try fixture.rootThread()
+        try expect(orphan.project == nil, "An unfiled chat outside any project root produced a project")
+        try expect(orphan.projectID == orphanPath, "An unfiled chat outside any project root did not fall back to cwd")
+        try expect(orphan.projectPath == orphanPath, "An unfiled chat did not keep its own directory as the project path")
+    }
 }
 
 private final class CodexFixture {
@@ -297,6 +375,12 @@ private final class CodexFixture {
         try runSQLite(sql, database: stateDB).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Writes to the state database, for tests that need to simulate a column the
+    /// client has left stale.
+    func exec(_ sql: String) throws {
+        _ = try runSQLite(sql, database: stateDB)
+    }
+
     /// The root thread, looked up by id because Branch inserts additional rows
     /// that would otherwise take over `loadThreads().first`.
     func rootThread() throws -> CodexThread {
@@ -353,6 +437,21 @@ private final class CodexFixture {
     func readGlobalState() throws -> [String: Any] {
         let data = try Data(contentsOf: home.appendingPathComponent(".codex-global-state.json"))
         return try require(JSONSerialization.jsonObject(with: data) as? [String: Any], "Global state is not a JSON object")
+    }
+
+    func writeGlobalState(_ state: [String: Any]) throws {
+        let data = try JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])
+        try data.write(to: home.appendingPathComponent(".codex-global-state.json"))
+    }
+
+    /// Re-files a chat the way the client does: only the assignment changes, and
+    /// `threads.cwd` keeps naming the directory the chat was launched in.
+    func assign(threadID: String, to projectID: String) throws {
+        var state = try readGlobalState()
+        var assignments = state["thread-project-assignments"] as? [String: Any] ?? [:]
+        assignments[threadID] = ["projectKind": "local", "projectId": projectID]
+        state["thread-project-assignments"] = assignments
+        try writeGlobalState(state)
     }
 
     func readJSONLMeta(at url: URL) throws -> [String: Any] {
@@ -481,8 +580,7 @@ private final class CodexFixture {
             "thread-workspace-root-hints": [:],
             "thread-projectless-output-directories": [:]
         ]
-        let data = try JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])
-        try data.write(to: home.appendingPathComponent(".codex-global-state.json"))
+        try writeGlobalState(state)
     }
 
     private func writeJSONLine(_ object: [String: Any], to url: URL) throws {

@@ -45,6 +45,11 @@ package struct CodexThread: Identifiable, Hashable {
     package let sectionPosition: Int64?
     package let sectionEnteredAt: Date?
     package let childThreadIDs: [String]
+    /// The Codex project this chat belongs to, as the client models it.
+    ///
+    /// `nil` when the client models no project for the chat — an unfiled chat in
+    /// a directory that is not a project root — which then groups by `cwd`.
+    package let project: CodexProject?
 
     package init(
         id: String,
@@ -90,7 +95,8 @@ package struct CodexThread: Identifiable, Hashable {
         threadSectionID: String? = nil,
         sectionPosition: Int64? = nil,
         sectionEnteredAt: Date? = nil,
-        childThreadIDs: [String] = []
+        childThreadIDs: [String] = [],
+        project: CodexProject? = nil
     ) {
         self.id = id
         self.rolloutPath = rolloutPath
@@ -136,6 +142,7 @@ package struct CodexThread: Identifiable, Hashable {
         self.sectionPosition = sectionPosition
         self.sectionEnteredAt = sectionEnteredAt
         self.childThreadIDs = childThreadIDs
+        self.project = project
     }
 
     /// The file on disk that backs this chat, which is the recorded rollout path
@@ -155,11 +162,24 @@ package struct CodexThread: Identifiable, Hashable {
     }
 
     package var projectName: String {
-        URL(fileURLWithPath: cwd).lastPathComponent.isEmpty ? cwd : URL(fileURLWithPath: cwd).lastPathComponent
+        if let project { return project.name }
+        return ProjectSummary.projectName(for: cwd)
     }
 
+    /// Grouping key. Prefers the client's project id and falls back to the launch
+    /// directory for chats the client never filed.
     package var projectID: String {
-        ProjectSummary.projectID(for: cwd)
+        if let project { return project.id }
+        return ProjectSummary.projectID(for: cwd)
+    }
+
+    /// Directory the chat's project points at, and therefore the move
+    /// destination. Resolved from the project rather than `cwd`, so a chat can be
+    /// moved into the project it is already filed under without the client's
+    /// assignment being rewritten.
+    package var projectPath: String {
+        if let project, !project.path.isEmpty { return project.path }
+        return cwd
     }
 
     package var isSubagent: Bool {
@@ -283,11 +303,14 @@ package struct ProjectSummary: Identifiable, Hashable {
     package static func make(from threads: [CodexThread], sort: ProjectSortMode = .recent) -> [ProjectSummary] {
         let grouped = Dictionary(grouping: threads) { $0.projectID }
         let projects = grouped.map { projectID, items -> ProjectSummary in
-            let firstCWD = items.first?.cwd ?? projectID
+            // Every thread in a group resolves to the same project, so the first
+            // one supplies the display name and directory. This is what lets a
+            // project appear even when none of its chats were launched in it.
+            let representative = items.first
             return ProjectSummary(
                 id: projectID,
-                name: projectName(for: firstCWD),
-                path: projectID == chatsID ? "" : projectID,
+                name: representative?.projectName ?? projectID,
+                path: projectID == chatsID ? "" : (representative?.projectPath ?? projectID),
                 totalCount: items.count,
                 repairCount: items.filter(\.needsRepair).count,
                 availableCount: items.filter(\.isAvailable).count,

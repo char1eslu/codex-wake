@@ -100,7 +100,7 @@ final class AppModel: ObservableObject {
         let movableThreads = selectedThreads.filter { !$0.archived && $0.fileExists }
         guard !movableThreads.isEmpty else { return [] }
         return projects.filter { project in
-            project.id != ProjectSummary.allID && project.id != ProjectSummary.chatsID && !movableThreads.allSatisfy { $0.cwd == project.path }
+            project.id != ProjectSummary.allID && project.id != ProjectSummary.chatsID && !movableThreads.allSatisfy { $0.projectPath == project.path }
         }
     }
 
@@ -394,7 +394,7 @@ final class AppModel: ObservableObject {
 
     func moveSelectedThreads(to project: ProjectSummary) async {
         let targets = orderedThreads(for: selectedThreadIDs).filter {
-            !$0.archived && $0.fileExists && $0.cwd != project.path
+            !$0.archived && $0.fileExists && $0.projectPath != project.path
         }
         guard !targets.isEmpty else {
             status = "No selected chats need to move"
@@ -634,7 +634,11 @@ final class AppModel: ObservableObject {
             selectedTrashThreadIDs.remove(thread.id)
             await refresh()
             await refreshBackups()
-            selectedProjectID = ProjectSummary.projectID(for: thread.cwd)
+            // Resolve the project from the restored thread itself: the manifest
+            // only carries the launch directory, which no longer decides which
+            // project a chat belongs to.
+            selectedProjectID = threads.first { $0.id == thread.threadID }?.projectID
+                ?? ProjectSummary.projectID(for: thread.cwd)
             setSelection([thread.threadID], preferredID: thread.threadID, shouldLoadPreview: true)
         } catch {
             errorMessage = Self.readable(error)

@@ -185,6 +185,18 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         )
     }
 
+    /// The client's project model, used to file chats the way the sidebar does.
+    ///
+    /// A missing or unreadable global state yields an empty catalog, which drops
+    /// every chat back to `cwd` grouping — the behaviour before projects were
+    /// resolved through the client.
+    private func loadProjectCatalog() -> CodexProjectCatalog {
+        guard let data = try? Data(contentsOf: globalState),
+              let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return CodexProjectCatalog(globalState: [:]) }
+        return CodexProjectCatalog(globalState: state)
+    }
+
     package func loadThreads(includeSubagents: Bool) throws -> [CodexThread] {
         guard fileManager.fileExists(atPath: codexHome.path) else { throw WakeError.missingCodexHome(codexHome) }
         guard fileManager.fileExists(atPath: stateDB.path) else { throw WakeError.missingStateDatabase(stateDB) }
@@ -193,6 +205,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         let index = try loadSessionIndex()
         let rows = try loadThreadRows(from: stateDB)
         let spawnEdges = try loadSpawnEdges(from: stateDB)
+        let catalog = loadProjectCatalog()
         var childIDsByParent: [String: [String]] = [:]
         for row in rows {
             if let parent = spawnEdges[row.id]?.parentThreadID ?? parentThreadID(from: row.source) {
@@ -247,7 +260,8 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
                 threadSectionID: row.thread_section_id,
                 sectionPosition: row.section_position,
                 sectionEnteredAt: WakeDates.dateFromMilliseconds(row.section_entered_at_ms),
-                childThreadIDs: (childIDsByParent[row.id] ?? []).sorted()
+                childThreadIDs: (childIDsByParent[row.id] ?? []).sorted(),
+                project: catalog.project(forThread: row.id, launchedIn: row.cwd)
             )
         }
         .filter { includeSubagents || $0.isUserFacing }
@@ -792,7 +806,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
 
         return MoveReport(
             threadID: thread.id,
-            fromProject: thread.cwd,
+            fromProject: thread.projectPath,
             toProject: project.path,
             timestamp: stamp,
             backups: backups,
