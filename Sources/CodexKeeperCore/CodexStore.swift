@@ -226,7 +226,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
                 sessionIndexUpdatedAt: WakeDates.parseISO(indexEntry?.updated_at),
                 sessionMetaTimestamp: nil,
                 sessionPayloadTimestamp: nil,
-                fileExists: fileManager.fileExists(atPath: row.rollout_path),
+                fileExists: RolloutFile.exists(row.rollout_path, fileManager: fileManager),
                 modelProvider: row.model_provider,
                 model: row.model,
                 reasoningEffort: row.reasoning_effort,
@@ -293,7 +293,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
                     cwd: manifest.cwd,
                     trashedAt: WakeDates.parseISO(manifest.trashedAt),
                     size: size,
-                    originalExists: fileManager.fileExists(atPath: manifest.originalPath)
+                    originalExists: RolloutFile.exists(manifest.originalPath, fileManager: fileManager)
                 )
             )
         }
@@ -454,11 +454,11 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
     }
 
     package func loadPreview(for thread: CodexThread) throws -> ThreadPreview {
-        guard fileManager.fileExists(atPath: thread.rolloutPath) else {
+        guard RolloutFile.exists(thread.rolloutPath, fileManager: fileManager) else {
             throw WakeError.missingThreadFile(thread.rolloutPath)
         }
 
-        let content = try String(contentsOf: URL(fileURLWithPath: thread.rolloutPath), encoding: .utf8)
+        let content = try RolloutFile.readText(for: thread.rolloutPath, fileManager: fileManager)
         var messages: [PreviewMessage] = []
         var currentTurnStartLine: Int?
         var hasVisibleUserMessageInTurn = false
@@ -512,32 +512,15 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
     }
 
     package func threadContainsRawText(_ thread: CodexThread, query: String) throws -> Bool {
-        guard fileManager.fileExists(atPath: thread.rolloutPath) else { return false }
         guard query.count >= 3 else { return false }
-        let handle = try FileHandle(forReadingFrom: thread.rolloutURL)
-        defer { try? handle.close() }
-
-        let lowerQuery = query.lowercased()
-        // Keep a tail of raw bytes between chunks so a match that straddles a
-        // 512KB boundary is not missed, and so a multi-byte UTF-8 character cut
-        // at the boundary is re-joined instead of dropping the whole chunk.
-        let overlap = max(0, lowerQuery.utf8.count - 1)
-        var carry = Data()
-        while true {
-            if Task.isCancelled { return false }
-            let data = handle.readData(ofLength: 512 * 1024)
-            if data.isEmpty { return false }
-            var buffer = carry
-            buffer.append(data)
-            if let chunk = String(data: buffer, encoding: .utf8)?.lowercased(),
-               chunk.contains(lowerQuery) {
-                return true
-            }
-            // Carry the trailing bytes (including a possibly split character)
-            // forward to the next read so a boundary-straddling match survives.
-            let tailCount = min(overlap + 3, buffer.count)
-            carry = buffer.suffix(tailCount)
-        }
+        // The chunking, boundary carry-over and the compressed path all live in
+        // RolloutFile so the uncompressed and `.zst` cases cannot drift apart.
+        return try RolloutFile.containsText(
+            query,
+            for: thread.rolloutPath,
+            fileManager: fileManager,
+            isCancelled: { Task.isCancelled }
+        )
     }
 
     package func wake(thread: CodexThread) throws -> WakeReport {
@@ -547,7 +530,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         guard thread.hasConversationContent else {
             throw WakeError.commandFailed("This chat has no recorded user message, so there is nothing to add to the session index.")
         }
-        guard fileManager.fileExists(atPath: thread.rolloutPath) else {
+        guard RolloutFile.exists(thread.rolloutPath, fileManager: fileManager) else {
             throw WakeError.missingThreadFile(thread.rolloutPath)
         }
 
@@ -568,14 +551,17 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         try upsertSessionIndex(threadID: thread.id, title: thread.shortTitle, updatedAt: WakeDates.isoNowForIndex())
         changed.append(sessionIndex.path)
 
-        try updateSessionMeta(path: thread.rolloutURL, timestamp: WakeDates.isoNowForJSONL())
+        // Rewriting the session metadata needs a plain JSONL file; the backup
+        // above already captured the original `.zst` artifact.
+        let rolloutURL = try RolloutFile.materialize(for: thread.rolloutPath, fileManager: fileManager)
+        try updateSessionMeta(path: rolloutURL, timestamp: WakeDates.isoNowForJSONL())
         changed.append(thread.rolloutPath)
 
         return WakeReport(threadID: thread.id, timestamp: stamp, backups: backups, changedFiles: changed)
     }
 
     package func trim(thread: CodexThread, fromLine lineNumber: Int) throws -> TrimReport {
-        guard fileManager.fileExists(atPath: thread.rolloutPath) else {
+        guard RolloutFile.exists(thread.rolloutPath, fileManager: fileManager) else {
             throw WakeError.missingThreadFile(thread.rolloutPath)
         }
         guard lineNumber > 1 else {
@@ -583,9 +569,12 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         }
 
         let stamp = backupStamp()
-        let rolloutURL = thread.rolloutURL
-        let backupPath = try backup(rolloutURL, suffix: "\(stamp)-trim").path
+        let backupPath = try backup(thread.rolloutURL, suffix: "\(stamp)-trim").path
 
+        // A compressed rollout is expanded in place before the rewrite so the
+        // result lands on the path Codex records; the backup above still holds
+        // the original `.zst` artifact.
+        let rolloutURL = try RolloutFile.materialize(for: thread.rolloutPath, fileManager: fileManager)
         let content = try String(contentsOf: rolloutURL, encoding: .utf8)
         var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         if lines.last == "" {
@@ -611,14 +600,16 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
     }
 
     package func branch(thread: CodexThread, fromLine lineNumber: Int) throws -> BranchReport {
-        guard fileManager.fileExists(atPath: thread.rolloutPath) else {
+        guard RolloutFile.exists(thread.rolloutPath, fileManager: fileManager) else {
             throw WakeError.missingThreadFile(thread.rolloutPath)
         }
         guard lineNumber > 1 else {
             throw WakeError.commandFailed("Cannot branch before the first JSONL line.")
         }
 
-        let content = try String(contentsOf: thread.rolloutURL, encoding: .utf8)
+        // Branching only reads the source chat and writes a brand new rollout,
+        // so a compressed source never has to be expanded on disk.
+        let content = try RolloutFile.readText(for: thread.rolloutPath, fileManager: fileManager)
         var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         if lines.last == "" {
             lines.removeLast()
@@ -755,7 +746,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         guard !project.path.isEmpty else {
             throw WakeError.commandFailed("Cannot move to All Projects")
         }
-        guard fileManager.fileExists(atPath: thread.rolloutPath) else {
+        guard RolloutFile.exists(thread.rolloutPath, fileManager: fileManager) else {
             throw WakeError.missingThreadFile(thread.rolloutPath)
         }
         try throwIfLive(thread)
@@ -774,23 +765,27 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
             threadID: thread.id,
             destinationPath: project.path
         )
-        let originalRollout = try Data(contentsOf: thread.rolloutURL)
+        let originalRollout = try RolloutFile.readData(for: thread.rolloutPath, fileManager: fileManager)
         let movedRollout = try sessionMetaDataMoving(originalRollout, cwd: project.path)
 
         backups += try backupStateFiles(stamp: backupSuffix)
         backups.append(try backup(globalState, suffix: backupSuffix).path)
         backups.append(try backup(thread.rolloutURL, suffix: backupSuffix).path)
 
+        // The cwd rewrite needs a plain JSONL file; the backup above already
+        // captured the original `.zst` artifact.
+        let rolloutURL = try RolloutFile.materialize(for: thread.rolloutPath, fileManager: fileManager)
+
         do {
             try writeDataAtomically(movedGlobalState, to: globalState)
             changed.append(globalState.path)
-            try writeDataAtomically(movedRollout, to: thread.rolloutURL)
+            try writeDataAtomically(movedRollout, to: rolloutURL)
             changed.append(thread.rolloutPath)
             try updateSQLiteProject(threadID: thread.id, cwd: project.path)
             changed.append(stateDB.path)
         } catch {
             try? writeDataAtomically(originalGlobalState, to: globalState)
-            try? writeDataAtomically(originalRollout, to: thread.rolloutURL)
+            try? writeDataAtomically(originalRollout, to: rolloutURL)
             try? updateSQLiteProject(threadID: thread.id, cwd: thread.cwd)
             throw error
         }
@@ -926,7 +921,12 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         guard originalURL.path.hasPrefix(sessionsRoot.path + "/") else {
             throw WakeError.commandFailed("Refusing to restore a chat outside ~/.codex/sessions.")
         }
-        if fileManager.fileExists(atPath: originalURL.path) {
+        // A chat that was compressed before it was trashed has to come back under
+        // the `.zst` name, or Codex would try to parse a zstd stream as JSONL.
+        // Both names are checked so a restore cannot clobber either form.
+        let compressedOriginalURL = URL(fileURLWithPath: manifest.originalPath + RolloutFile.compressedSuffix)
+        if fileManager.fileExists(atPath: originalURL.path)
+            || fileManager.fileExists(atPath: compressedOriginalURL.path) {
             throw WakeError.commandFailed("Original chat file already exists.")
         }
 
@@ -947,6 +947,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
         }
 
         try fileManager.createDirectory(at: originalURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var restoredURL = originalURL
         if let trashPath = manifest.trashPath {
             let trashURL = URL(fileURLWithPath: trashPath).standardizedFileURL
             guard trashURL.path.hasPrefix(threadTrash.standardizedFileURL.path + "/"),
@@ -954,7 +955,8 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
             else {
                 throw WakeError.commandFailed("Trashed chat file is missing.")
             }
-            try fileManager.copyItem(at: trashURL, to: originalURL)
+            restoredURL = RolloutFile.isCompressed(trashURL) ? compressedOriginalURL : originalURL
+            try fileManager.copyItem(at: trashURL, to: restoredURL)
         }
 
         do {
@@ -986,7 +988,7 @@ package final class CodexStore: ThreadStore, @unchecked Sendable {
             try? removeSessionIndexEntry(threadID: manifest.threadID)
             try? writeDataAtomically(currentGlobalState, to: globalState)
             if !thread.originalExists {
-                try? fileManager.removeItem(at: originalURL)
+                try? fileManager.removeItem(at: restoredURL)
             }
             throw error
         }

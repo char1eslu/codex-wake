@@ -138,7 +138,12 @@ package struct CodexThread: Identifiable, Hashable {
         self.childThreadIDs = childThreadIDs
     }
 
-    package var rolloutURL: URL { URL(fileURLWithPath: rolloutPath) }
+    /// The file on disk that backs this chat, which is the recorded rollout path
+    /// for a live chat and its `.zst` sibling once Codex has compressed it.
+    ///
+    /// Everything that opens, backs up, moves or reveals a rollout goes through
+    /// here, so resolution happens in one place instead of at each call site.
+    package var rolloutURL: URL { RolloutFile.resolvedURL(for: rolloutPath) }
     package var shortTitle: String {
         for candidate in [sessionIndexTitle, title, firstUserMessage] {
             let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)

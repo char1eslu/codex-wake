@@ -9,6 +9,7 @@ private struct CompatibilityTestRunner {
         try suite.testModernThreadMetadataAndSubagentsCanBeProjected()
         try suite.testMoveUpdatesSQLiteRolloutAndNativeProjectMetadata()
         try suite.testTrashAndRestorePreserveCurrentMetadataAndRelations()
+        try suite.testCompressedRolloutsStayFullyUsable()
         print("Codex Keeper compatibility tests passed")
     }
 }
@@ -128,6 +129,114 @@ struct CodexStoreCompatibilityTests {
         try expect(assignment?["projectId"] as? String == fixture.sourceProjectID, "Native project assignment was not restored")
         try expect(try fixture.store.loadThreads().first?.childThreadCount == 1, "Restored parent lost its child count")
     }
+
+    /// Codex ages rollouts out by replacing `rollout-*.jsonl` with a
+    /// zstd-compressed `.jsonl.zst` sibling while `rollout_path` in the state
+    /// database keeps naming the uncompressed file. A compressed chat is still a
+    /// real chat, so it has to stay previewable, searchable, trimmable,
+    /// branchable, movable, and restorable — and a restore must put it back under
+    /// the name it was stored with.
+    func testCompressedRolloutsStayFullyUsable() throws {
+        let fixture = try CodexFixture()
+        defer { try? fixture.remove() }
+
+        // Give the root chat a second line so Trim and Branch have a line to act
+        // on, then compress it the way Codex does.
+        try fixture.appendJSONLine(
+            ["type": "response_item", "payload": ["type": "message", "role": "user"]],
+            to: fixture.rootRollout
+        )
+        try fixture.compressRootRollout()
+        try expect(
+            !FileManager.default.fileExists(atPath: fixture.rootRollout.path),
+            "Compressing the fixture left the plain rollout behind"
+        )
+
+        let thread = try fixture.rootThread()
+        try expect(thread.fileExists, "A compressed rollout must still count as present")
+        try expect(thread.statusLabel != "Missing file", "A compressed rollout must not be reported as a missing file")
+        try expect(thread.isAvailable, "A compressed rollout must stay available")
+
+        // Preview reads through the decompressor.
+        _ = try fixture.store.loadPreview(for: thread)
+
+        // Search streams the decompressed file and still matches content.
+        let found = try fixture.store.threadContainsRawText(thread, query: fixture.rootID)
+        try expect(found, "Content search missed a match inside a compressed rollout")
+        let absent = try fixture.store.threadContainsRawText(thread, query: "definitely-not-present")
+        try expect(!absent, "Content search reported a match that is not there")
+
+        // Move rewrites the session metadata, so the rollout is expanded first.
+        let destination = ProjectSummary(
+            id: fixture.destinationPath,
+            name: "Destination",
+            path: fixture.destinationPath,
+            totalCount: 0,
+            repairCount: 0,
+            availableCount: 0,
+            latestUpdatedAt: nil
+        )
+        _ = try fixture.store.move(thread: thread, to: destination)
+        try expect(FileManager.default.fileExists(atPath: fixture.rootRollout.path), "Move did not leave a plain rollout behind")
+        try expect(
+            !FileManager.default.fileExists(atPath: fixture.rootRollout.path + RolloutFile.compressedSuffix),
+            "Move left the stale compressed rollout behind"
+        )
+        let moved = try fixture.readJSONLMeta(at: fixture.rootRollout)
+        try expect(
+            (moved["payload"] as? [String: Any])?["cwd"] as? String == fixture.destinationPath,
+            "Move did not rewrite the compressed rollout"
+        )
+
+        // Branch only reads the source, so a compressed source must not be
+        // expanded on disk.
+        try fixture.compressRootRollout()
+        let branch = try fixture.store.branch(thread: try fixture.rootThread(), fromLine: 2)
+        try expect(FileManager.default.fileExists(atPath: branch.rolloutPath), "Branch did not write its new rollout")
+        try expect(
+            FileManager.default.fileExists(atPath: fixture.rootRollout.path + RolloutFile.compressedSuffix),
+            "Branching expanded the compressed source"
+        )
+        try expect(
+            !FileManager.default.fileExists(atPath: fixture.rootRollout.path),
+            "Branching left a plain copy of the compressed source"
+        )
+
+        // Trim rewrites the compressed chat in place.
+        let trim = try fixture.store.trim(thread: try fixture.rootThread(), fromLine: 2)
+        try expect(trim.removedLineCount == 1, "Trim removed the wrong number of lines from a compressed rollout")
+        try expect(FileManager.default.fileExists(atPath: fixture.rootRollout.path), "Trim did not leave a plain rollout behind")
+        try expect(
+            !FileManager.default.fileExists(atPath: fixture.rootRollout.path + RolloutFile.compressedSuffix),
+            "Trim left the stale compressed rollout behind"
+        )
+        try expect(
+            try fixture.readJSONLMeta(at: fixture.rootRollout)["type"] as? String == "session_meta",
+            "Trim corrupted the compressed rollout"
+        )
+
+        // Trash and restore must return the chat under the `.zst` name, not as a
+        // zstd stream wearing a `.jsonl` name.
+        try fixture.compressRootRollout()
+        _ = try fixture.store.moveThreadToTrash(try fixture.rootThread())
+        try expect(
+            !FileManager.default.fileExists(atPath: fixture.rootRollout.path + RolloutFile.compressedSuffix),
+            "Trash left the compressed rollout behind"
+        )
+        let trashed = try require(fixture.store.loadThreadTrash().first, "Trashed thread manifest is missing")
+        try fixture.store.restoreTrashedThread(trashed)
+        try expect(
+            FileManager.default.fileExists(atPath: fixture.rootRollout.path + RolloutFile.compressedSuffix),
+            "Restore did not put the compressed rollout back under its `.zst` name"
+        )
+        try expect(
+            !FileManager.default.fileExists(atPath: fixture.rootRollout.path),
+            "Restore wrote a zstd stream to the plain `.jsonl` name"
+        )
+        let restored = try fixture.rootThread()
+        try expect(restored.fileExists, "Restored compressed rollout is not reported as present")
+        _ = try fixture.store.loadPreview(for: restored)
+    }
 }
 
 private final class CodexFixture {
@@ -186,6 +295,47 @@ private final class CodexFixture {
 
     func query(_ sql: String) throws -> String {
         try runSQLite(sql, database: stateDB).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The root thread, looked up by id because Branch inserts additional rows
+    /// that would otherwise take over `loadThreads().first`.
+    func rootThread() throws -> CodexThread {
+        try require(
+            store.loadThreads().first(where: { $0.id == rootID }),
+            "Fixture parent thread is missing"
+        )
+    }
+
+    /// Appends one raw JSONL line so a test can build a rollout with content that
+    /// Trim and Branch can act on.
+    func appendJSONLine(_ object: [String: Any], to url: URL) throws {
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        var content = data
+        content.append(Data("\n".utf8))
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: content)
+    }
+
+    /// Compresses the root rollout the way Codex ages one out: the plain file is
+    /// replaced by `<name>.jsonl.zst`, while `rollout_path` keeps naming the
+    /// uncompressed file.
+    func compressRootRollout() throws {
+        let executable = try require(RolloutFile.zstdExecutable, "The zstd CLI is required to exercise compressed rollouts")
+        let compressed = URL(fileURLWithPath: rootRollout.path + RolloutFile.compressedSuffix)
+        if FileManager.default.fileExists(atPath: compressed.path) {
+            try FileManager.default.removeItem(at: compressed)
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = ["-q", "-f", "-o", compressed.path, "--", rootRollout.path]
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw CompatibilityTestFailure(description: "zstd could not compress the fixture rollout")
+        }
+        try FileManager.default.removeItem(at: rootRollout)
     }
 
     func queryCatalog(_ sql: String) throws -> String {
