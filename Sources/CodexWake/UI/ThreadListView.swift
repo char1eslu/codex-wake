@@ -142,13 +142,15 @@ struct ThreadListView: View {
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 70, alignment: .leading)
 
-            Button {
-                Task { await model.wakeSelectedThreads() }
-            } label: {
-                Label("Repair", systemImage: "wrench.and.screwdriver")
+            if model.canRepairSelectedThreads {
+                Button {
+                    Task { await model.wakeSelectedThreads() }
+                } label: {
+                    Label("Repair", systemImage: "wrench.and.screwdriver")
+                }
+                .liquidGlassButtonStyle()
+                .disabled(model.isLoading)
             }
-            .liquidGlassButtonStyle()
-            .disabled(model.isLoading || !model.canRepairSelectedThreads)
 
             Button {
                 isMoveSheetPresented = true
@@ -301,13 +303,15 @@ private struct ThreadContextMenu: View {
     @Binding var isMoveSheetPresented: Bool
 
     var body: some View {
-        Button {
-            model.focusContextSelection(on: thread)
-            Task { await model.wakeThreads(ids: targetIDs) }
-        } label: {
-            Label(targetIDs.count > 1 ? "Repair Selected Indexes" : "Repair Index", systemImage: "wrench.and.screwdriver")
+        if model.canRepairThreads(ids: targetIDs) {
+            Button {
+                model.focusContextSelection(on: thread)
+                Task { await model.wakeThreads(ids: targetIDs) }
+            } label: {
+                Label(targetIDs.count > 1 ? "Repair Selected Indexes" : "Repair Index", systemImage: "wrench.and.screwdriver")
+            }
+            .disabled(model.isLoading)
         }
-        .disabled(model.isLoading)
 
         Button {
             model.focusContextSelection(on: thread)

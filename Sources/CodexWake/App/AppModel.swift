@@ -92,6 +92,13 @@ final class AppModel: ObservableObject {
         selectedThreads.contains(where: \.needsRepair)
     }
 
+    /// True when at least one chat in `ids` is missing its session_index entry.
+    /// Drives the on-demand visibility of the Repair Index buttons, mirroring
+    /// the sidebar badge, which is already hidden when `repairCount == 0`.
+    func canRepairThreads(ids: Set<String>) -> Bool {
+        orderedThreads(for: ids).contains(where: \.needsRepair)
+    }
+
     var canTrashSelectedThreads: Bool {
         !selectedThreads.isEmpty
     }

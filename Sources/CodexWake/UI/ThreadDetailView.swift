@@ -146,7 +146,9 @@ struct ThreadDetailView: View {
 
     private func actions(_ thread: CodexThread) -> some View {
         HStack(spacing: 8) {
-            repairButton(thread)
+            if thread.needsRepair {
+                repairButton(thread)
+            }
             moveButton(thread)
             revealButton(thread)
             trashButton(thread)
@@ -164,7 +166,7 @@ struct ThreadDetailView: View {
             actionLabel("Repair Index", systemImage: "wrench.and.screwdriver")
         }
         .liquidGlassProminentButtonStyle()
-        .disabled(model.isLoading || !thread.needsRepair)
+        .disabled(model.isLoading)
         .help(model.isDemoMode ? "Show a demo repair report without changing local files" : "Back up metadata and add the missing session_index.jsonl entry")
     }
 

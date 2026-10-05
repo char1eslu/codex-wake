@@ -6,6 +6,7 @@ private struct CompatibilityTestRunner {
     static func main() throws {
         let suite = CodexStoreCompatibilityTests()
         try suite.testSubagentsAreFoldedIntoParentAndNeverListedForRepair()
+        try suite.testOnlyRealChatsMissingFromTheIndexNeedRepair()
         try suite.testModernThreadMetadataAndSubagentsCanBeProjected()
         try suite.testMoveUpdatesSQLiteRolloutAndNativeProjectMetadata()
         try suite.testTrashAndRestorePreserveCurrentMetadataAndRelations()
@@ -25,6 +26,62 @@ struct CodexStoreCompatibilityTests {
         try expect(threads.first?.childThreadCount == 1, "Parent should report one subagent")
         try expect(threads.first?.isSubagent == false, "Parent must not be classified as a subagent")
         try expect(threads.first?.needsRepair == false, "Indexed parent must not need repair")
+    }
+
+    /// `needsRepair` is the only thing that decides whether the Repair Index
+    /// buttons are drawn at all, so its truth table is what stops them from
+    /// becoming permanent toolbar furniture.
+    ///
+    /// The middle case is the load-bearing one: on this machine 199 rows are
+    /// absent from `session_index.jsonl` and the buttons are still correctly
+    /// hidden, because every one of those rows is a subagent.
+    func testOnlyRealChatsMissingFromTheIndexNeedRepair() throws {
+        let fixture = try CodexFixture()
+        defer { try? fixture.remove() }
+
+        // 1. Indexed real chat: nothing to repair.
+        let parent = try fixture.rootThread()
+        try expect(parent.isSubagent == false, "The fixture parent must not be a subagent")
+        try expect(parent.isInSessionIndex, "The fixture parent is expected to be indexed")
+        try expect(parent.needsRepair == false, "An indexed chat must not offer Repair Index")
+
+        // 2. Unindexed subagent: still nothing to repair. Subagents are folded
+        //    into their parent and never receive an index entry of their own.
+        let child = try require(
+            fixture.store.loadThreads(includeSubagents: true).first(where: { $0.id == fixture.childID }),
+            "Fixture subagent thread is missing"
+        )
+        try expect(child.isSubagent, "The fixture child must be classified as a subagent")
+        try expect(child.isInSessionIndex == false, "The fixture subagent is expected to be unindexed")
+        try expect(
+            child.needsRepair == false,
+            "An unindexed subagent must not offer Repair Index"
+        )
+
+        // 3. Unindexed real chat: the one case that must offer it.
+        try fixture.insertUnindexedChat(id: fixture.unindexedID)
+        let unindexed = try require(
+            fixture.store.loadThreads().first(where: { $0.id == fixture.unindexedID }),
+            "The unindexed fixture chat is missing"
+        )
+        try expect(unindexed.isSubagent == false, "The unindexed chat must not be a subagent")
+        try expect(unindexed.hasUserEvent == false, "The unindexed chat should mirror current builds, which leave has_user_event at 0")
+        try expect(unindexed.hasConversationContent, "The unindexed chat must carry conversation content")
+        try expect(unindexed.fileExists, "The unindexed chat must have a rollout on disk")
+        try expect(
+            unindexed.needsRepair,
+            "A real chat missing from session_index.jsonl must offer Repair Index"
+        )
+
+        // 4. Repairing it must hide the button again, because the model reloads
+        //    the thread list from disk straight after the repair.
+        _ = try fixture.store.wake(thread: unindexed)
+        let repaired = try require(
+            fixture.store.loadThreads().first(where: { $0.id == fixture.unindexedID }),
+            "The repaired chat disappeared from the store"
+        )
+        try expect(repaired.isInSessionIndex, "Repair Index did not add the missing index entry")
+        try expect(repaired.needsRepair == false, "Repair Index left the chat flagged as needing repair")
     }
 
     func testModernThreadMetadataAndSubagentsCanBeProjected() throws {
@@ -337,6 +394,12 @@ private final class CodexFixture {
     /// scopes its deletion to the requested thread instead of emptying a table.
     let decoyID = "00000000-0000-7000-8000-000000000003"
 
+    /// A real (non-subagent) chat that the client never wrote to
+    /// `session_index.jsonl`. This is the only shape that must offer Repair
+    /// Index, so tests create it on demand rather than baking it into the base
+    /// fixture, where it would change what every other test sees.
+    let unindexedID = "00000000-0000-7000-8000-000000000004"
+
     init() throws {
         // Deliberately rooted at `/tmp` rather than `FileManager.temporaryDirectory`.
         // On macOS `/tmp` is a symlink to `/private/tmp` and `temporaryDirectory`
@@ -420,6 +483,40 @@ private final class CodexFixture {
             throw CompatibilityTestFailure(description: "zstd could not compress the fixture rollout")
         }
         try FileManager.default.removeItem(at: rootRollout)
+    }
+
+    /// Adds a real chat whose rollout exists on disk but which is absent from
+    /// `session_index.jsonl` — the single state Repair Index exists to fix.
+    ///
+    /// `has_user_event` is written as 0 on purpose: current Codex builds leave it
+    /// 0 for every row, so repair eligibility has to come from
+    /// `first_user_message` instead.
+    func insertUnindexedChat(id: String) throws {
+        let rollout = home.appendingPathComponent("sessions/2026/08/18/unindexed.jsonl")
+        try FileManager.default.createDirectory(
+            at: rollout.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try writeJSONLine(
+            [
+                "type": "session_meta",
+                "timestamp": "2026-08-18T00:00:00Z",
+                "payload": ["id": id, "cwd": sourcePath, "thread_source": "user"]
+            ],
+            to: rollout
+        )
+        try appendJSONLine(
+            ["type": "response_item", "payload": ["type": "message", "role": "user"]],
+            to: rollout
+        )
+        try exec(
+            "insert into threads values (" +
+            "'\(id)', '\(sql(rollout.path))', 120, 210, 'vscode', 'openai', " +
+            "'\(sql(sourcePath))', 'Unindexed', '{}', 'never', 0, 0, 0, null, " +
+            "null, null, null, '1.0', 'Unindexed message', null, null, 'enabled', " +
+            "'gpt-test', 'medium', null, 120000, 210000, 'user', 'Unindexed preview', " +
+            "205, 205000, 'legacy', null, 0, null, null, null);"
+        )
     }
 
     func queryCatalog(_ sql: String) throws -> String {
