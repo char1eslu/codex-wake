@@ -349,6 +349,18 @@ private func filteredThreads(
         return matchesProject(thread, project: project)
     }
 
+    // Prefer exact project identity over substring matching. A bare
+    // `--project Downloads` otherwise also matches every project that merely
+    // lives under a `Downloads/` parent, which on a real store turned a
+    // 4-chat project into a 20-chat result.
+    if let project, !project.isEmpty {
+        let q = project.lowercased()
+        let exact = matches.filter {
+            $0.projectID.lowercased() == q || $0.projectName.lowercased() == q
+        }
+        if !exact.isEmpty { matches = exact }
+    }
+
     if let normalizedQuery, !normalizedQuery.isEmpty {
         matches = matches.filter { thread in
             if thread.matchesMetadata(normalizedQuery) {
@@ -366,7 +378,7 @@ private func matchesProject(_ thread: CodexThread, project: String) -> Bool {
     let q = project.lowercased()
     return thread.projectID.lowercased().contains(q)
         || thread.projectName.lowercased().contains(q)
-        || thread.cwd.lowercased().contains(q)
+        || thread.projectPath.lowercased().contains(q)
 }
 
 private func resolveThread(_ id: String, in threads: [CodexThread]) throws -> CodexThread {
